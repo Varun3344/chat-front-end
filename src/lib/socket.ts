@@ -30,11 +30,21 @@ const getSocket = () => {
   return socketInstance;
 };
 
+type SocketAuth = Record<string, any> & { userId?: string };
+
+const getAuthPayload = (auth: Socket["auth"]): SocketAuth => {
+  if (!auth || typeof auth === "function") {
+    return {};
+  }
+  return auth as SocketAuth;
+};
+
 const ensureConnection = (userId?: string) => {
   const socket = getSocket();
   if (!socket) return null;
-  if (userId && socket.auth?.userId !== userId) {
-    socket.auth = { ...(socket.auth ?? {}), userId };
+  const authPayload = getAuthPayload(socket.auth);
+  if (userId && authPayload.userId !== userId) {
+    socket.auth = { ...authPayload, userId };
   }
   if (!socket.connected) {
     socket.connect();
