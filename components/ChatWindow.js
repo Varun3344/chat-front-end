@@ -201,7 +201,14 @@ export default function ChatWindow({
               </p>
             )}
             <p style={styles.messageBody}>{message.message}</p>
-            <span style={styles.timestamp}>{formatTime(message.createdAt)}</span>
+            <div style={styles.messageMeta}>
+              <span style={styles.timestamp}>{formatTime(message.createdAt)}</span>
+              {message.from === currentUser.id && (
+                <span style={styles.deliveryState}>
+                  {message.optimistic ? "sending..." : message.status ?? "sent"}
+                </span>
+              )}
+            </div>
           </article>
         ))}
         <span ref={bottomRef} />
@@ -400,11 +407,21 @@ const styles = {
     margin: 0,
     lineHeight: 1.6,
   },
-  timestamp: {
-    display: "block",
+  messageMeta: {
+    display: "flex",
+    gap: 8,
+    alignItems: "center",
     marginTop: 10,
     fontSize: "0.75rem",
-    opacity: 0.6,
+    opacity: 0.7,
+  },
+  timestamp: {
+    margin: 0,
+  },
+  deliveryState: {
+    textTransform: "lowercase",
+    letterSpacing: 0.3,
+    color: "#c4b5fd",
   },
   composer: {
     display: "flex",

@@ -1,15 +1,18 @@
 import { io, Socket } from "socket.io-client";
 
 const SOCKET_URL =
-  process.env.NEXT_PUBLIC_SOCKET_URL ?? process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
+  process.env.NEXT_PUBLIC_SOCKET_URL ??
+  process.env.NEXT_PUBLIC_API_URL ??
+  process.env.NEXT_PUBLIC_API_BASE_URL ??
+  "";
 
 const SOCKET_EVENTS = {
+  REGISTER_USER: "register_user",
   JOIN_DIRECT: "join_direct_room",
-  LEAVE_DIRECT: "leave_direct_room",
-  JOIN_GROUP: "join_group_room",
-  LEAVE_GROUP: "leave_group_room",
   SEND_DIRECT: "send_direct_message",
   RECEIVE_DIRECT: "receive_direct_message",
+  JOIN_GROUP: "join_group_room",
+  LEAVE_GROUP: "leave_group_room",
   SEND_GROUP: "send_group_message",
   RECEIVE_GROUP: "receive_group_message",
 } as const;
@@ -52,10 +55,6 @@ const ensureConnection = (userId?: string) => {
   return socket;
 };
 
-// Sorting the participant ids keeps both browsers in the same direct room id.
-const directRoomId = (userA: string, userB: string) =>
-  [userA, userB].filter(Boolean).sort().join("__");
-
 export const connectSocket = (userId: string, metadata: Record<string, any> = {}) => {
   const socket = getSocket();
   if (!socket) return null;
@@ -63,6 +62,14 @@ export const connectSocket = (userId: string, metadata: Record<string, any> = {}
   if (!socket.connected) {
     socket.connect();
   }
+  return socket;
+};
+
+export const registerUser = (userId: string) => {
+  if (!userId) return null;
+  const socket = ensureConnection(userId);
+  if (!socket) return null;
+  socket.emit(SOCKET_EVENTS.REGISTER_USER, userId);
   return socket;
 };
 
@@ -74,16 +81,9 @@ export const disconnectSocket = () => {
 export const joinDirectRoom = (userId: string, peerId: string) => {
   const socket = ensureConnection(userId);
   if (!socket) return null;
-  const room = directRoomId(userId, peerId);
-  socket.emit(SOCKET_EVENTS.JOIN_DIRECT, { room, userId, peerId });
-  return room;
-};
-
-export const leaveDirectRoom = (userId: string, peerId: string) => {
-  const socket = getSocket();
-  if (!socket) return;
-  const room = directRoomId(userId, peerId);
-  socket.emit(SOCKET_EVENTS.LEAVE_DIRECT, { room, userId, peerId });
+  const payload = { userA: userId, userB: peerId };
+  socket.emit(SOCKET_EVENTS.JOIN_DIRECT, payload);
+  return payload;
 };
 
 export const joinGroupRoom = (groupId: string, userId?: string) => {
@@ -99,18 +99,15 @@ export const leaveGroupRoom = (groupId: string, userId?: string) => {
 };
 
 export const emitDirectMessage = (payload: {
-  room?: string;
   from: string;
   to: string;
   message: string;
-  messageId?: string;
+  clientMessageId?: string;
+  metadata?: Record<string, any>;
 }) => {
   const socket = ensureConnection(payload.from);
   if (!socket) return;
-  socket.emit(SOCKET_EVENTS.SEND_DIRECT, {
-    ...payload,
-    room: payload.room ?? directRoomId(payload.from, payload.to),
-  });
+  socket.emit(SOCKET_EVENTS.SEND_DIRECT, payload);
 };
 
 export const emitGroupMessage = (payload: {
@@ -125,7 +122,7 @@ export const emitGroupMessage = (payload: {
 };
 
 export const listenDirectMessage = (handler: (payload: any) => void) => {
-  const socket = getSocket();
+  const socket = ensureConnection();
   if (!socket) return () => {};
   socket.on(SOCKET_EVENTS.RECEIVE_DIRECT, handler);
   return () => socket.off(SOCKET_EVENTS.RECEIVE_DIRECT, handler);
@@ -143,9 +140,9 @@ export const socket = {
     return socketInstance;
   },
   connect: connectSocket,
+  registerUser,
   disconnect: disconnectSocket,
   joinDirectRoom,
-  leaveDirectRoom,
   joinGroupRoom,
   leaveGroupRoom,
   emitDirectMessage,

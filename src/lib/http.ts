@@ -10,7 +10,10 @@ export interface RequestOptions {
   useBaseUrl?: boolean;
 }
 
-const BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
+const BASE_URL =
+  process.env.NEXT_PUBLIC_API_BASE_URL ??
+  process.env.NEXT_PUBLIC_API_URL ??
+  "";
 
 const isFormData = (value: unknown): value is FormData => {
   if (typeof FormData === "undefined") return false;
@@ -69,7 +72,9 @@ export async function httpRequest<T = any>(path: string, options: RequestOptions
   } = options;
 
   if (!BASE_URL && useBaseUrl && !/^https?:\/\//i.test(path)) {
-    throw new Error("Missing NEXT_PUBLIC_API_BASE_URL. Please update your .env file.");
+    throw new Error(
+      "Missing NEXT_PUBLIC_API_BASE_URL (or NEXT_PUBLIC_API_URL). Please update your .env file."
+    );
   }
 
   const headers: Record<string, string> = {
