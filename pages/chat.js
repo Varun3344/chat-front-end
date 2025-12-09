@@ -1,20 +1,26 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/router";
+import {
+  fetchDirectMessagesViaApi,
+  sendDirectMessageViaApi,
+} from "src/lib/client/directMessages";
+import {
+  fetchGroupMessagesViaApi,
+  listGroupsViaApi,
+  sendGroupMessageViaApi,
+} from "src/lib/client/groupMessages";
 import { USERS } from "../data/dummyData";
 import socket, {
   getSocket,
   joinDirectRoom,
+  joinGroupRoom,
+  leaveGroupRoom,
   listenForDirectMessages,
+  listenForGroupMessages,
   registerUser,
   sendDirectMessage as emitDirectMessage,
+  sendGroupMessage as emitGroupMessage,
 } from "../utils/socket";
-
-const GROUP_EVENTS = {
-  JOIN: "join_group",
-  LEAVE: "leave_group",
-  SEND: "send_group_message",
-  RECEIVE: "receive_group_message",
-};
 
 const everyone = USERS.map((user) => user.id);
 
@@ -121,6 +127,33 @@ const createMessageFromPayload = (payload = {}, overrides = {}) => {
   };
 };
 
+const mergeFetchedMessages = (existingHistory = [], fetchedMessages = []) => {
+  const normalized = (Array.isArray(fetchedMessages) ? fetchedMessages : [])
+    .map((payload) =>
+      createMessageFromPayload(payload, {
+        optimistic: false,
+        status: "sent",
+      })
+    )
+    .sort((a, b) => {
+      const left = Date.parse(a.timestamp ?? "") || 0;
+      const right = Date.parse(b.timestamp ?? "") || 0;
+      return left - right;
+    });
+
+  const ackedIds = new Set(
+    normalized
+      .map((message) => message.clientMessageId)
+      .filter((value) => Boolean(value))
+  );
+
+  const optimisticRemainder = (Array.isArray(existingHistory) ? existingHistory : []).filter(
+    (message) => message.optimistic && (!message.clientMessageId || !ackedIds.has(message.clientMessageId))
+  );
+
+  return [...normalized, ...optimisticRemainder];
+};
+
 export default function ChatPage() {
   const router = useRouter();
   const [currentUserId, setCurrentUserId] = useState(null);
@@ -131,6 +164,7 @@ export default function ChatPage() {
   );
   const [directMessages, setDirectMessages] = useState({});
   const [groupMessages, setGroupMessages] = useState({});
+  const [remoteGroups, setRemoteGroups] = useState([]);
   const [messageInput, setMessageInput] = useState("");
   const [connectionState, setConnectionState] = useState("connecting");
   const [isSocketReady, setIsSocketReady] = useState(false);
@@ -170,15 +204,44 @@ export default function ChatPage() {
     });
   }, [contacts]);
 
+  useEffect(() => {
+    if (!currentUserId) {
+      setRemoteGroups([]);
+      return;
+    }
+    let cancelled = false;
+    const controller = new AbortController();
+    listGroupsViaApi(currentUserId, { signal: controller.signal })
+      .then((response) => {
+        if (cancelled) return;
+        setRemoteGroups(Array.isArray(response) ? response : []);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        console.error("[chat] group list fetch failed", error);
+        setRemoteGroups([]);
+      });
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [currentUserId]);
+
   const groups = useMemo(() => {
     if (!currentUserId) return [];
-    return DEFAULT_GROUPS.filter(
-      (group) =>
-        !Array.isArray(group.members) ||
-        group.members.length === 0 ||
-        group.members.includes(currentUserId)
-    );
-  }, [currentUserId]);
+    const source = remoteGroups.length > 0 ? remoteGroups : DEFAULT_GROUPS;
+    return source
+      .filter((group) => {
+        const members = Array.isArray(group.members) ? group.members : [];
+        return members.length === 0 || members.includes(currentUserId);
+      })
+      .map((group) => ({
+        ...group,
+        members: Array.isArray(group.members) ? group.members : [],
+        description: group.description ?? group.name ?? "Group chat",
+      }));
+  }, [currentUserId, remoteGroups]);
 
   useEffect(() => {
     if (groups.length === 0) {
@@ -265,11 +328,36 @@ export default function ChatPage() {
   }, [isSocketReady, currentUserId]);
 
   useEffect(() => {
-    if (!isSocketReady) return;
-    const instance = socketRef.current;
-    if (!instance) return;
+    if (!currentUserId || !activeContactId) return;
+    let cancelled = false;
+    const controller = new AbortController();
 
-    const handleGroupMessage = (payload) => {
+    fetchDirectMessagesViaApi(
+      { userA: currentUserId, userB: activeContactId },
+      { signal: controller.signal }
+    )
+      .then((messages) => {
+        if (cancelled) return;
+        setDirectMessages((prev) => ({
+          ...prev,
+          [activeContactId]: mergeFetchedMessages(prev[activeContactId], messages),
+        }));
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        console.error("[chat] direct history fetch failed", error);
+      });
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [currentUserId, activeContactId]);
+
+  useEffect(() => {
+    if (!isSocketReady) return;
+
+    const unsubscribe = listenForGroupMessages((payload) => {
       if (!payload?.groupId) return;
       const isMember = groups.some((group) => group.id === payload.groupId);
       if (!isMember) {
@@ -283,14 +371,36 @@ export default function ChatPage() {
           [payload.groupId]: [...history, normalized],
         };
       });
-    };
-
-    instance.on(GROUP_EVENTS.RECEIVE, handleGroupMessage);
+    });
 
     return () => {
-      instance.off(GROUP_EVENTS.RECEIVE, handleGroupMessage);
+      unsubscribe();
     };
   }, [isSocketReady, groups]);
+
+  useEffect(() => {
+    if (!currentUserId || !activeGroupId) return;
+    let cancelled = false;
+    const controller = new AbortController();
+
+    fetchGroupMessagesViaApi(activeGroupId, { signal: controller.signal })
+      .then((messages) => {
+        if (cancelled) return;
+        setGroupMessages((prev) => ({
+          ...prev,
+          [activeGroupId]: mergeFetchedMessages(prev[activeGroupId], messages),
+        }));
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        console.error("[chat] group history fetch failed", error);
+      });
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [currentUserId, activeGroupId]);
 
   useEffect(() => {
     if (!isSocketReady || !currentUserId || !activeContactId) return;
@@ -299,14 +409,11 @@ export default function ChatPage() {
 
   useEffect(() => {
     if (!isSocketReady || !currentUserId || !activeGroupId) return;
-    const instance = socketRef.current;
-    if (!instance) return;
 
-    const payload = { groupId: activeGroupId, userId: currentUserId };
-    instance.emit(GROUP_EVENTS.JOIN, payload);
+    joinGroupRoom(activeGroupId, currentUserId);
 
     return () => {
-      instance.emit(GROUP_EVENTS.LEAVE, payload);
+      leaveGroupRoom(activeGroupId, currentUserId);
     };
   }, [activeGroupId, currentUserId, isSocketReady]);
 
@@ -335,7 +442,10 @@ export default function ChatPage() {
           ],
         };
       });
-      instance.emit(GROUP_EVENTS.SEND, payload);
+      emitGroupMessage(payload);
+      sendGroupMessageViaApi(payload).catch((error) => {
+        console.error("[chat] group REST send failed", error);
+      });
     } else if (activeContactId) {
       const clientMessageId = generateClientMessageId();
       const payload = {
@@ -358,6 +468,17 @@ export default function ChatPage() {
         };
       });
       emitDirectMessage(payload);
+      sendDirectMessageViaApi({
+        from: payload.from,
+        to: payload.to,
+        message: payload.message,
+        metadata: {
+          ...(payload.metadata ?? {}),
+          clientMessageId,
+        },
+      }).catch((error) => {
+        console.error("[chat] direct REST send failed", error);
+      });
     }
 
     setMessageInput("");

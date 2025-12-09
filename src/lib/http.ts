@@ -11,8 +11,8 @@ export interface RequestOptions {
 }
 
 const BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL ??
-  process.env.NEXT_PUBLIC_API_URL ??
+  process.env.CHAT_API_BASE ??
+  process.env.NEXT_PUBLIC_CHAT_API_BASE ??
   "";
 
 const isFormData = (value: unknown): value is FormData => {
@@ -73,7 +73,7 @@ export async function httpRequest<T = any>(path: string, options: RequestOptions
 
   if (!BASE_URL && useBaseUrl && !/^https?:\/\//i.test(path)) {
     throw new Error(
-      "Missing NEXT_PUBLIC_API_BASE_URL (or NEXT_PUBLIC_API_URL). Please update your .env file."
+      "Missing CHAT_API_BASE (or NEXT_PUBLIC_CHAT_API_BASE). Please update your .env file."
     );
   }
 

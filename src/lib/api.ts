@@ -1,5 +1,9 @@
 import { createFormData, httpRequest, type RequestOptions } from "./http";
 
+if (typeof window !== "undefined") {
+  throw new Error("Chat API helpers can only be imported on the server.");
+}
+
 type ApiEnvelope<T> = {
   data: T;
   message?: string;
@@ -109,17 +113,17 @@ export interface DeleteGroupResponse {
 export interface FetchGroupMessagesResponse extends ChatMessage {}
 
 const KEYS = {
-  directSend: process.env.NEXT_PUBLIC_API_KEY_DIRECT,
-  directFetch: process.env.NEXT_PUBLIC_API_KEY_DIRECT_FETCH,
-  directAttachment: process.env.NEXT_PUBLIC_API_KEY_DIRECT_ATTACHMENT,
-  directDelete: process.env.NEXT_PUBLIC_API_KEY_DIRECT_DELETE,
-  groupCreate: process.env.NEXT_PUBLIC_API_KEY_GROUP_CREATE,
-  groupMember: process.env.NEXT_PUBLIC_API_KEY_GROUP_MEMBER,
-  groupSend: process.env.NEXT_PUBLIC_API_KEY_GROUP,
-  groupFetch: process.env.NEXT_PUBLIC_API_KEY_GROUP,
-  groupAttachment: process.env.NEXT_PUBLIC_API_KEY_GROUP_ATTACHMENT,
-  groupDelete: process.env.NEXT_PUBLIC_API_KEY_GROUP_DELETE,
-  admin: process.env.NEXT_PUBLIC_API_KEY_ADMIN,
+  directSend: process.env.CHAT_API_KEY_DIRECT,
+  directFetch: process.env.CHAT_API_KEY_DIRECT_FETCH,
+  directAttachment: process.env.CHAT_API_KEY_DIRECT_ATTACHMENT,
+  directDelete: process.env.CHAT_API_KEY_DIRECT_DELETE,
+  groupCreate: process.env.CHAT_API_KEY_GROUP_CREATE,
+  groupMember: process.env.CHAT_API_KEY_GROUP_MEMBER,
+  groupSend: process.env.CHAT_API_KEY_GROUP,
+  groupFetch: process.env.CHAT_API_KEY_GROUP,
+  groupAttachment: process.env.CHAT_API_KEY_GROUP_ATTACHMENT,
+  groupDelete: process.env.CHAT_API_KEY_GROUP_DELETE,
+  admin: process.env.CHAT_API_KEY_ADMIN,
 } as const;
 
 type KeyName = keyof typeof KEYS;
@@ -131,7 +135,7 @@ const getKey = (key: KeyName) => {
   const value = KEYS[key];
   if (!value) {
     throw new Error(
-      `Missing API key: ${key}. Please verify the corresponding NEXT_PUBLIC env variable in .env.`
+      `Missing API key: ${key}. Please verify the corresponding CHAT_API_KEY_* env variable in .env.local.`
     );
   }
   return value;
