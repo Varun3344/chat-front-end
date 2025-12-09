@@ -1,7 +1,5 @@
-import { useRouter } from "next/router";
 import { useEffect, useMemo, useRef, useState } from "react";
-import ChatWindow from "../components/ChatWindow";
-import UserList from "../components/UserList";
+import { useRouter } from "next/router";
 import { USERS } from "../data/dummyData";
 import socket, {
   getSocket,
@@ -26,25 +24,34 @@ const DEFAULT_GROUPS = [
     name: "Product Squad",
     description: "Daily stand-up room for the product/engineering group.",
     members: ["ravi", "shwetha", "varun"],
-    createdBy: "ravi",
   },
   {
     id: "gtm-task-force",
     name: "GTM Task Force",
     description: "Marketing, CS and Product triage.",
     members: ["ravi", "kumar"],
-    createdBy: "kumar",
   },
   {
     id: "all-hands",
     name: "Company All Hands",
-    description: "Everyone gets this broadcast - tie it to announcements.",
+    description: "Everyone gets this broadcast – tie it to announcements.",
     members: everyone,
-    createdBy: "ravi",
   },
 ];
 
-const formatNameMatch = (value = "") => value.trim().toLowerCase();
+const lookupName = (userId) =>
+  USERS.find((user) => user.id === userId)?.name ?? userId ?? "Teammate";
+
+const formatTime = (value) => {
+  try {
+    return new Date(value).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return "";
+  }
+};
 
 const generateClientMessageId = () =>
   `client-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -106,7 +113,6 @@ const createMessageFromPayload = (payload = {}, overrides = {}) => {
     groupId: payload.groupId ?? overrides.groupId ?? null,
     message: payload.message ?? overrides.message ?? "",
     timestamp,
-    createdAt: timestamp,
     optimistic: overrides.optimistic ?? false,
     status:
       overrides.status ??
@@ -120,15 +126,14 @@ export default function ChatPage() {
   const [currentUserId, setCurrentUserId] = useState(null);
   const [activeRoster, setActiveRoster] = useState("direct");
   const [activeContactId, setActiveContactId] = useState(null);
-  const [activeGroupId, setActiveGroupId] = useState(null);
-  const [searchTerm, setSearchTerm] = useState("");
-  const [groups, setGroups] = useState(DEFAULT_GROUPS);
+  const [activeGroupId, setActiveGroupId] = useState(
+    DEFAULT_GROUPS[0]?.id ?? null
+  );
   const [directMessages, setDirectMessages] = useState({});
   const [groupMessages, setGroupMessages] = useState({});
+  const [messageInput, setMessageInput] = useState("");
   const [connectionState, setConnectionState] = useState("connecting");
   const [isSocketReady, setIsSocketReady] = useState(false);
-  const [isSending, setIsSending] = useState(false);
-  const [errorMessage, setErrorMessage] = useState("");
 
   const socketRef = useRef(socket);
 
@@ -147,96 +152,54 @@ export default function ChatPage() {
     [currentUserId]
   );
 
-  const baseContacts = useMemo(
+  const contacts = useMemo(
     () => USERS.filter((user) => user.id !== currentUserId),
     [currentUserId]
   );
 
   useEffect(() => {
-    if (!currentUserId || baseContacts.length === 0) {
+    if (contacts.length === 0) {
       setActiveContactId(null);
       return;
     }
     setActiveContactId((previous) => {
-      if (previous && baseContacts.some((contact) => contact.id === previous)) {
+      if (previous && contacts.some((contact) => contact.id === previous)) {
         return previous;
       }
-      return baseContacts[0]?.id ?? null;
+      return contacts[0].id;
     });
-  }, [baseContacts, currentUserId]);
+  }, [contacts]);
 
-  const visibleGroups = useMemo(() => {
+  const groups = useMemo(() => {
     if (!currentUserId) return [];
-    return groups.filter(
+    return DEFAULT_GROUPS.filter(
       (group) =>
         !Array.isArray(group.members) ||
         group.members.length === 0 ||
         group.members.includes(currentUserId)
     );
-  }, [groups, currentUserId]);
+  }, [currentUserId]);
 
   useEffect(() => {
-    if (visibleGroups.length === 0) {
+    if (groups.length === 0) {
       setActiveGroupId(null);
       return;
     }
     setActiveGroupId((previous) => {
-      if (previous && visibleGroups.some((group) => group.id === previous)) {
+      if (previous && groups.some((group) => group.id === previous)) {
         return previous;
       }
-      return visibleGroups[0]?.id ?? null;
+      return groups[0].id;
     });
-  }, [visibleGroups]);
+  }, [groups]);
 
   useEffect(() => {
-    if (activeRoster === "group" && visibleGroups.length === 0) {
+    if (activeRoster === "group" && groups.length === 0) {
       setActiveRoster("direct");
-    } else if (activeRoster === "direct" && baseContacts.length === 0) {
-      setActiveRoster(visibleGroups.length > 0 ? "group" : "direct");
+    } else if (activeRoster === "direct" && contacts.length === 0) {
+      setActiveRoster(groups.length > 0 ? "group" : "direct");
     }
-  }, [activeRoster, baseContacts.length, visibleGroups.length]);
-
-  const contactCards = useMemo(() => {
-    return baseContacts.map((contact) => {
-      const history = directMessages[contact.id] ?? [];
-      const lastEntry = history[history.length - 1];
-      return {
-        ...contact,
-        lastMessage: lastEntry?.message ?? contact.status ?? "",
-        lastTimestamp: lastEntry?.timestamp ?? null,
-      };
-    });
-  }, [baseContacts, directMessages]);
-
-  const groupCards = useMemo(() => {
-    return visibleGroups.map((group) => {
-      const history = groupMessages[group.id] ?? [];
-      const lastEntry = history[history.length - 1];
-      return {
-        ...group,
-        lastMessage: lastEntry?.message ?? group.description ?? "",
-        lastTimestamp: lastEntry?.timestamp ?? null,
-      };
-    });
-  }, [visibleGroups, groupMessages]);
-
-  const searchValue = formatNameMatch(searchTerm);
-
-  const filteredContacts = useMemo(() => {
-    if (!searchValue) return contactCards;
-    return contactCards.filter((contact) => {
-      const haystack = `${contact.name} ${contact.role ?? ""} ${contact.id}`.toLowerCase();
-      return haystack.includes(searchValue);
-    });
-  }, [contactCards, searchValue]);
-
-  const filteredGroups = useMemo(() => {
-    if (!searchValue) return groupCards;
-    return groupCards.filter((group) => {
-      const haystack = `${group.name} ${group.description ?? ""}`.toLowerCase();
-      return haystack.includes(searchValue);
-    });
-  }, [groupCards, searchValue]);
+  }, [activeRoster, contacts.length, groups.length]);
 
   useEffect(() => {
     const instance = socketRef.current ?? getSocket();
@@ -308,7 +271,7 @@ export default function ChatPage() {
 
     const handleGroupMessage = (payload) => {
       if (!payload?.groupId) return;
-      const isMember = visibleGroups.some((group) => group.id === payload.groupId);
+      const isMember = groups.some((group) => group.id === payload.groupId);
       if (!isMember) {
         return;
       }
@@ -327,7 +290,7 @@ export default function ChatPage() {
     return () => {
       instance.off(GROUP_EVENTS.RECEIVE, handleGroupMessage);
     };
-  }, [isSocketReady, visibleGroups]);
+  }, [isSocketReady, groups]);
 
   useEffect(() => {
     if (!isSocketReady || !currentUserId || !activeContactId) return;
@@ -347,144 +310,77 @@ export default function ChatPage() {
     };
   }, [activeGroupId, currentUserId, isSocketReady]);
 
-  const handleSendMessage = async (text) => {
-    const trimmed = text.trim();
+  const handleSendMessage = (event) => {
+    event.preventDefault();
+    const trimmed = messageInput.trim();
     if (!trimmed || !currentUserId || !isSocketReady) {
+      setMessageInput("");
       return;
     }
-    setErrorMessage("");
-    setIsSending(true);
-    try {
-      if (activeRoster === "group" && activeGroupId) {
-        const payload = {
-          groupId: activeGroupId,
-          from: currentUserId,
-          message: trimmed,
+    const instance = socketRef.current;
+    if (activeRoster === "group" && activeGroupId) {
+      if (!instance) return;
+      const payload = {
+        groupId: activeGroupId,
+        from: currentUserId,
+        message: trimmed,
+      };
+      setGroupMessages((prev) => {
+        const history = prev[activeGroupId] ?? [];
+        return {
+          ...prev,
+          [activeGroupId]: [
+            ...history,
+            createMessageFromPayload(payload, { optimistic: true }),
+          ],
         };
-        setGroupMessages((prev) => {
-          const history = prev[activeGroupId] ?? [];
-          return {
-            ...prev,
-            [activeGroupId]: [
-              ...history,
-              createMessageFromPayload(payload, { optimistic: true }),
-            ],
-          };
-        });
-        const instance = socketRef.current;
-        if (instance) {
-          instance.emit(GROUP_EVENTS.SEND, payload);
-        }
-      } else if (activeContactId) {
-        const clientMessageId = generateClientMessageId();
-        const payload = {
-          from: currentUserId,
-          to: activeContactId,
-          message: trimmed,
-          clientMessageId,
+      });
+      instance.emit(GROUP_EVENTS.SEND, payload);
+    } else if (activeContactId) {
+      const clientMessageId = generateClientMessageId();
+      const payload = {
+        from: currentUserId,
+        to: activeContactId,
+        message: trimmed,
+        clientMessageId,
+      };
+      setDirectMessages((prev) => {
+        const history = prev[activeContactId] ?? [];
+        return {
+          ...prev,
+          [activeContactId]: [
+            ...history,
+            createMessageFromPayload(payload, {
+              optimistic: true,
+              status: "sending",
+            }),
+          ],
         };
-        setDirectMessages((prev) => {
-          const history = prev[activeContactId] ?? [];
-          return {
-            ...prev,
-            [activeContactId]: [
-              ...history,
-              createMessageFromPayload(payload, {
-                optimistic: true,
-                status: "sending",
-              }),
-            ],
-          };
-        });
-        emitDirectMessage(payload);
-      }
-    } catch (error) {
-      setErrorMessage(
-        error instanceof Error ? error.message : "Failed to send the message."
-      );
-    } finally {
-      setIsSending(false);
+      });
+      emitDirectMessage(payload);
     }
+
+    setMessageInput("");
   };
-
-  const handleCreateGroup = () => {
-    if (!currentUserId) return;
-    if (typeof window === "undefined") return;
-    const name =
-      window.prompt("Name of the new group channel?", "New project room")?.trim() ??
-      "";
-    if (!name) return;
-    const identifier = `${name.toLowerCase().replace(/[^a-z0-9]/gi, "-")}-${Date.now()
-      .toString(36)
-      .slice(2)}`;
-    const description =
-      window.prompt("Optional description for this group?", "") ?? "";
-    const nextGroup = {
-      id: identifier,
-      name,
-      description,
-      members: [currentUserId],
-      createdBy: currentUserId,
-    };
-    setGroups((previous) => [...previous, nextGroup]);
-    setActiveRoster("group");
-    setActiveGroupId(nextGroup.id);
-  };
-
-  const handleAddMember = async (memberId) => {
-    if (!activeGroupId || !memberId) return;
-    setGroups((previous) =>
-      previous.map((group) =>
-        group.id === activeGroupId
-          ? {
-              ...group,
-              members: Array.from(new Set([...(group.members ?? []), memberId])),
-            }
-          : group
-      )
-    );
-  };
-
-  const handleRemoveMember = async (memberId) => {
-    if (!activeGroupId || !memberId) return;
-    setGroups((previous) =>
-      previous.map((group) =>
-        group.id === activeGroupId
-          ? {
-              ...group,
-              members: (group.members ?? []).filter((id) => id !== memberId),
-            }
-          : group
-      )
-    );
-  };
-
-  const selectedContact = useMemo(
-    () => contactCards.find((contact) => contact.id === activeContactId) ?? null,
-    [activeContactId, contactCards]
-  );
-
-  const selectedGroup = useMemo(
-    () => groupCards.find((group) => group.id === activeGroupId) ?? null,
-    [activeGroupId, groupCards]
-  );
 
   const currentMessages =
     activeRoster === "group"
       ? groupMessages[activeGroupId] ?? []
       : directMessages[activeContactId] ?? [];
 
-  const isGroupAdmin =
-    activeRoster === "group" &&
-    selectedGroup &&
-    (selectedGroup.createdBy
-      ? selectedGroup.createdBy === currentUserId
-      : selectedGroup.members?.includes(currentUserId));
+  const roomLabel =
+    activeRoster === "group"
+      ? groups.find((group) => group.id === activeGroupId)?.name ?? "No group"
+      : contacts.find((contact) => contact.id === activeContactId)?.name ??
+        "No contact";
+
+  const canSendToRoom =
+    activeRoster === "group" ? Boolean(activeGroupId) : Boolean(activeContactId);
 
   if (!router.isReady || !currentUserId) {
     return (
       <div style={styles.blankState}>
-        <p>Loading chat workspace...</p>
+        <p>Loading chat experience...</p>
       </div>
     );
   }
@@ -492,9 +388,9 @@ export default function ChatPage() {
   if (!currentUser) {
     return (
       <div style={styles.blankState}>
-        <h2>Select an account first</h2>
+        <h2>Choose an account</h2>
         <p>
-          Visit the home page and choose a teammate so we can load their inbox.
+          Select a teammate on the home page so we know which user should join rooms.
         </p>
         <button style={styles.primaryButton} onClick={() => router.push("/")}>
           Go back
@@ -504,96 +400,388 @@ export default function ChatPage() {
   }
 
   return (
-    <main style={styles.layout}>
-      <UserList
-        currentUser={currentUser}
-        contacts={filteredContacts}
-        groups={filteredGroups}
-        activeRoster={activeRoster}
-        activeContactId={activeContactId}
-        activeGroupId={activeGroupId}
-        isGroupsLoading={false}
-        onRosterChange={setActiveRoster}
-        onSelectContact={setActiveContactId}
-        onSelectGroup={setActiveGroupId}
-        searchTerm={searchTerm}
-        onSearch={setSearchTerm}
-        onCreateGroup={handleCreateGroup}
-      />
-      <section style={styles.windowWrapper}>
-        <div style={styles.windowHeader}>
+    <div style={styles.page}>
+      <aside style={styles.sidebar}>
+        <div style={styles.profileCard}>
+          <div style={styles.avatar}>{currentUser.name[0]}</div>
           <div>
-            <p style={styles.windowEyebrow}>Realtime status</p>
-            <h3 style={styles.windowTitle}>
-              {connectionState === "connected" ? "Ready" : connectionState}
-            </h3>
+            <p style={styles.profileLabel}>Logged in as</p>
+            <h3 style={styles.profileName}>{currentUser.name}</h3>
+            <p style={styles.profileMeta}>{currentUser.role}</p>
+            <span
+              style={{
+                ...styles.connectionBadge,
+                background:
+                  connectionState === "connected" ? "#22c55e" : "#f97316",
+              }}
+            >
+              {connectionState}
+            </span>
           </div>
-          <span
+        </div>
+
+        <div style={styles.tabBar}>
+          <button
+            type="button"
+            onClick={() => setActiveRoster("direct")}
             style={{
-              ...styles.connectionBadge,
-              background:
-                connectionState === "connected" ? "#22c55e" : "#f97316",
+              ...styles.tabButton,
+              ...(activeRoster === "direct" ? styles.tabButtonActive : {}),
             }}
           >
-            {connectionState}
-          </span>
+            Direct
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveRoster("group")}
+            style={{
+              ...styles.tabButton,
+              ...(activeRoster === "group" ? styles.tabButtonActive : {}),
+            }}
+          >
+            Groups
+          </button>
         </div>
-        <ChatWindow
-          currentUser={currentUser}
-          chatType={activeRoster}
-          selectedContact={selectedContact}
-          selectedGroup={selectedGroup}
-          messages={currentMessages}
-          onSendMessage={handleSendMessage}
-          isLoading={false}
-          isSending={isSending}
-          errorMessage={errorMessage}
-          onAddMember={handleAddMember}
-          onRemoveMember={handleRemoveMember}
-          availableMembers={USERS}
-          isGroupAdmin={Boolean(isGroupAdmin)}
-        />
+
+        <div style={styles.listHeading}>
+          {activeRoster === "group" ? "Group rooms" : "Direct chats"}
+        </div>
+
+        <div style={styles.roomList}>
+          {activeRoster === "group"
+            ? groups.map((group) => (
+                <button
+                  key={group.id}
+                  type="button"
+                  onClick={() => {
+                    setActiveGroupId(group.id);
+                    setActiveRoster("group");
+                  }}
+                  style={{
+                    ...styles.roomButton,
+                    ...(group.id === activeGroupId ? styles.roomButtonActive : {}),
+                  }}
+                >
+                  <strong>{group.name}</strong>
+                  <span style={styles.roomDescription}>{group.description}</span>
+                  <span style={styles.roomMeta}>
+                    {group.members.length} members
+                  </span>
+                </button>
+              ))
+            : contacts.map((contact) => (
+                <button
+                  key={contact.id}
+                  type="button"
+                  onClick={() => {
+                    setActiveRoster("direct");
+                    setActiveContactId(contact.id);
+                  }}
+                  style={{
+                    ...styles.roomButton,
+                    ...(contact.id === activeContactId ? styles.roomButtonActive : {}),
+                  }}
+                >
+                  <strong>{contact.name}</strong>
+                  <span style={styles.roomDescription}>{contact.role}</span>
+                </button>
+              ))}
+
+          {activeRoster === "group" && groups.length === 0 && (
+            <p style={styles.helperText}>
+              No groups available for this user. Add them to a group to start a room.
+            </p>
+          )}
+          {activeRoster === "direct" && contacts.length === 0 && (
+            <p style={styles.helperText}>
+              No teammates to chat with. Add more contacts to see them here.
+            </p>
+          )}
+        </div>
+      </aside>
+
+      <section style={styles.chatPane}>
+        <header style={styles.chatHeader}>
+          <div>
+            <p style={styles.chatEyebrow}>Active room</p>
+            <h2 style={styles.chatTitle}>{roomLabel}</h2>
+          </div>
+          <button style={styles.secondaryButton} onClick={() => router.push("/")}>
+            Switch user
+          </button>
+        </header>
+
+        <div style={styles.messagesPane}>
+          {currentMessages.length === 0 ? (
+            <div style={styles.blankMessages}>
+              <p>No messages yet. Say hi to kick off this room.</p>
+            </div>
+          ) : (
+            currentMessages.map((message) => {
+              const isSelf = message.from === currentUserId;
+              return (
+                <div
+                  key={message.id}
+                  style={{
+                    ...styles.messageBubble,
+                    alignSelf: isSelf ? "flex-end" : "flex-start",
+                    background: isSelf ? "#4c1d95" : "#1e1b4b",
+                  }}
+                >
+                  <div style={styles.messageMeta}>
+                    <strong>{lookupName(message.from)}</strong>
+                    <span>{formatTime(message.timestamp)}</span>
+                    {isSelf && (
+                      <em style={styles.deliveryState}>
+                        {message.status === "sending"
+                          ? "sending..."
+                          : message.status ?? "sent"}
+                      </em>
+                    )}
+                  </div>
+                  <p style={styles.messageBody}>{message.message}</p>
+                </div>
+              );
+            })
+          )}
+        </div>
+
+        <form style={styles.composer} onSubmit={handleSendMessage}>
+          <textarea
+            style={styles.textarea}
+            placeholder={
+              activeRoster === "group"
+                ? "Message this group..."
+                : "Message this teammate..."
+            }
+            value={messageInput}
+            onChange={(event) => setMessageInput(event.target.value)}
+            rows={2}
+          />
+          <button
+            type="submit"
+            style={{
+              ...styles.primaryButton,
+              opacity: messageInput.trim() && canSendToRoom ? 1 : 0.6,
+            }}
+            disabled={!messageInput.trim() || !canSendToRoom}
+          >
+            Send
+          </button>
+        </form>
       </section>
-    </main>
+    </div>
   );
 }
 
 const styles = {
-  layout: {
+  page: {
     minHeight: "100vh",
     display: "flex",
-    background: "#020617",
-    color: "#f8fafc",
+    background: "#0f172a",
+    color: "#e2e8f0",
   },
-  windowWrapper: {
+  sidebar: {
+    width: 320,
+    borderRight: "1px solid rgba(148,163,184,0.2)",
+    padding: 24,
+    display: "flex",
+    flexDirection: "column",
+    gap: 16,
+  },
+  profileCard: {
+    display: "flex",
+    gap: 16,
+    padding: 16,
+    borderRadius: 16,
+    background: "rgba(15,23,42,0.6)",
+    border: "1px solid rgba(148,163,184,0.3)",
+  },
+  avatar: {
+    width: 48,
+    height: 48,
+    borderRadius: 12,
+    background: "#7c3aed",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontWeight: 600,
+    fontSize: "1.3rem",
+  },
+  profileLabel: {
+    fontSize: "0.8rem",
+    margin: 0,
+    color: "#94a3b8",
+  },
+  profileName: {
+    margin: "2px 0",
+    fontSize: "1.15rem",
+  },
+  profileMeta: {
+    margin: 0,
+    color: "#a5b4fc",
+    fontSize: "0.9rem",
+  },
+  connectionBadge: {
+    display: "inline-flex",
+    marginTop: 8,
+    padding: "2px 10px",
+    borderRadius: 999,
+    fontSize: "0.75rem",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  },
+  tabBar: {
+    display: "grid",
+    gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+    gap: 8,
+  },
+  tabButton: {
+    borderRadius: 999,
+    border: "1px solid rgba(148,163,184,0.4)",
+    padding: "6px 0",
+    background: "transparent",
+    color: "#e2e8f0",
+    cursor: "pointer",
+    fontWeight: 600,
+  },
+  tabButtonActive: {
+    borderColor: "#7c3aed",
+    background: "rgba(124,58,237,0.15)",
+  },
+  listHeading: {
+    fontSize: "0.9rem",
+    color: "#a5b4fc",
+    textTransform: "uppercase",
+    letterSpacing: 1,
+  },
+  roomList: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
+    overflowY: "auto",
+  },
+  roomButton: {
+    borderRadius: 14,
+    padding: 12,
+    border: "1px solid rgba(148,163,184,0.4)",
+    background: "transparent",
+    color: "inherit",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-start",
+    gap: 4,
+    textAlign: "left",
+    cursor: "pointer",
+  },
+  roomButtonActive: {
+    borderColor: "#c4b5fd",
+    background: "rgba(79,70,229,0.2)",
+  },
+  roomDescription: {
+    fontSize: "0.85rem",
+    color: "#94a3b8",
+  },
+  roomMeta: {
+    fontSize: "0.75rem",
+    color: "#a5b4fc",
+  },
+  helperText: {
+    marginTop: 16,
+    fontSize: "0.9rem",
+    color: "#94a3b8",
+  },
+  chatPane: {
     flex: 1,
     display: "flex",
     flexDirection: "column",
-    background: "#0f172a",
+    padding: 24,
+    gap: 16,
   },
-  windowHeader: {
+  chatHeader: {
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
-    padding: "20px 32px",
-    borderBottom: "1px solid rgba(148,163,184,0.2)",
   },
-  windowEyebrow: {
+  chatEyebrow: {
     margin: 0,
     textTransform: "uppercase",
     letterSpacing: 1,
     fontSize: "0.75rem",
     color: "#94a3b8",
   },
-  windowTitle: {
+  chatTitle: {
     margin: "4px 0 0",
-    fontSize: "1.1rem",
   },
-  connectionBadge: {
-    padding: "6px 14px",
+  messagesPane: {
+    flex: 1,
+    borderRadius: 18,
+    background: "rgba(15,23,42,0.6)",
+    border: "1px solid rgba(148,163,184,0.2)",
+    padding: 24,
+    display: "flex",
+    flexDirection: "column",
+    gap: 12,
+    overflowY: "auto",
+  },
+  blankMessages: {
+    margin: "auto",
+    color: "#94a3b8",
+  },
+  messageBubble: {
+    padding: 12,
+    borderRadius: 16,
+    maxWidth: "70%",
+    display: "flex",
+    flexDirection: "column",
+    gap: 4,
+    color: "#f8fafc",
+  },
+  messageMeta: {
+    fontSize: "0.8rem",
+    display: "flex",
+    gap: 8,
+    alignItems: "center",
+  },
+  deliveryState: {
+    fontSize: "0.75rem",
+    color: "#c4b5fd",
+    textTransform: "lowercase",
+  },
+  messageBody: {
+    margin: 0,
+    lineHeight: 1.4,
+  },
+  composer: {
+    display: "flex",
+    gap: 12,
+    alignItems: "flex-end",
+  },
+  textarea: {
+    flex: 1,
+    borderRadius: 16,
+    border: "1px solid rgba(148,163,184,0.4)",
+    padding: 14,
+    background: "rgba(15,23,42,0.6)",
+    color: "#f8fafc",
+    resize: "none",
+  },
+  primaryButton: {
     borderRadius: 999,
-    fontSize: "0.85rem",
-    textTransform: "capitalize",
+    border: "none",
+    background: "#7c3aed",
+    color: "#fff",
+    padding: "12px 24px",
+    fontWeight: 600,
+    cursor: "pointer",
+  },
+  secondaryButton: {
+    borderRadius: 999,
+    border: "1px solid rgba(148,163,184,0.5)",
+    background: "transparent",
+    color: "#e2e8f0",
+    padding: "8px 18px",
+    cursor: "pointer",
   },
   blankState: {
     minHeight: "100vh",
@@ -605,14 +793,5 @@ const styles = {
     textAlign: "center",
     background: "#0f172a",
     color: "#e2e8f0",
-  },
-  primaryButton: {
-    borderRadius: 999,
-    border: "none",
-    background: "#7c3aed",
-    color: "#fff",
-    padding: "12px 24px",
-    fontWeight: 600,
-    cursor: "pointer",
   },
 };
