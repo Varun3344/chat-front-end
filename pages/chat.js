@@ -18,12 +18,22 @@ import socket, {
   getSocket,
   joinDirectRoom,
   joinGroupRoom,
-  leaveGroupRoom,
+  leaveDirectRoom,
   listenForDirectMessages,
   listenForGroupMessages,
+  listenForDirectTyping,
+  listenForGroupTyping,
+  listenForPresenceSnapshots,
+  listenForPresenceUpdates,
+  listenForUnreadCounts,
+  listenForGroupActivity,
+  listenForDirectAttachments,
+  listenForGroupAttachments,
+  focusGroupRoom,
+  blurGroupRoom,
   registerUser,
-  sendDirectMessage as emitDirectMessage,
-  sendGroupMessage as emitGroupMessage,
+  sendDirectTyping as emitDirectTyping,
+  sendGroupTyping as emitGroupTyping,
 } from "../utils/socket";
 
 const everyone = USERS.map((user) => user.id);
@@ -34,18 +44,21 @@ const DEFAULT_GROUPS = [
     name: "Product Squad",
     description: "Daily stand-up room for the product/engineering group.",
     members: ["ravi", "shwetha", "varun"],
+    createdBy: "ravi",
   },
   {
     id: "gtm-task-force",
     name: "GTM Task Force",
     description: "Marketing, CS and Product triage.",
     members: ["ravi", "kumar"],
+    createdBy: "ravi",
   },
   {
     id: "all-hands",
     name: "Company All Hands",
-    description: "Everyone gets this broadcast – tie it to announcements.",
+    description: "Everyone gets this broadcast - tie it to announcements.",
     members: everyone,
+    createdBy: "ravi",
   },
 ];
 
@@ -61,6 +74,17 @@ const formatTime = (value) => {
   } catch {
     return "";
   }
+};
+
+const formatFileSize = (bytes) => {
+  const size = Number(bytes) || 0;
+  if (size >= 1024 * 1024) {
+    return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  if (size >= 1024) {
+    return `${(size / 1024).toFixed(1)} KB`;
+  }
+  return `${size} B`;
 };
 
 const generateClientMessageId = () =>
@@ -109,25 +133,46 @@ const createMessageFromPayload = (payload = {}, overrides = {}) => {
     new Date().toISOString();
   const clientMessageId =
     payload.clientMessageId ?? overrides.clientMessageId ?? null;
+  const inferredAttachments =
+    Array.isArray(payload.attachments) && payload.attachments.length > 0
+      ? payload.attachments
+      : payload.type === "attachment"
+      ? [
+          {
+            name: payload.fileName ?? overrides.fileName,
+            fileName: payload.fileName,
+            mimeType: payload.mimeType,
+            size: payload.size,
+          },
+        ]
+      : overrides.attachments ?? [];
+  const resolvedMessage =
+    payload.message ??
+    overrides.message ??
+    (payload.type === "attachment" && payload.fileName
+      ? `Shared ${payload.fileName}`
+      : "");
 
   return {
     id:
       payload.id ??
       payload.messageId ??
       overrides.id ??
-      clientMessageId ??
+      clientMessageId ?? 
       `temp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
     clientMessageId: clientMessageId ?? undefined,
     from: payload.from ?? overrides.from ?? "system",
     to: payload.to ?? overrides.to ?? null,
     groupId: payload.groupId ?? overrides.groupId ?? null,
-    message: payload.message ?? overrides.message ?? "",
+    message: resolvedMessage,
     timestamp,
     optimistic: overrides.optimistic ?? false,
     status:
       overrides.status ??
       payload.status ??
       (overrides.optimistic ? "sending" : "sent"),
+    type: payload.type ?? overrides.type ?? "message",
+    attachments: inferredAttachments,
   };
 };
 
@@ -185,9 +230,20 @@ export default function ChatPage() {
   const [messageActionTarget, setMessageActionTarget] = useState(null);
   const [messageActionError, setMessageActionError] = useState(null);
   const [isDeletingMessageId, setIsDeletingMessageId] = useState(null);
+  const [isMemberManagerOpen, setIsMemberManagerOpen] = useState(false);
+  const [presenceMap, setPresenceMap] = useState({});
+  const [unreadCounts, setUnreadCounts] = useState({ direct: {}, group: {} });
+  const [remoteTyping, setRemoteTyping] = useState({ direct: {}, group: {} });
 
   const socketRef = useRef(socket);
   const messageActionTimerRef = useRef(null);
+  const remoteTypingTimersRef = useRef({
+    direct: new Map(),
+    group: new Map(),
+  });
+  const localTypingRef = useRef({ direct: false, group: false });
+  const localTypingTimerRef = useRef(null);
+  const previousDirectPeerRef = useRef(null);
 
   useEffect(() => {
     if (!router.isReady) return;
@@ -258,6 +314,12 @@ export default function ChatPage() {
         ...group,
         members: Array.isArray(group.members) ? group.members : [],
         description: group.description ?? group.name ?? "Group chat",
+        createdBy:
+          group.createdBy ??
+          group.ownerId ??
+          group.created_by ??
+          (Array.isArray(group.members) ? group.members[0] : undefined) ??
+          null,
       }));
   }, [currentUserId, remoteGroups]);
 
@@ -265,6 +327,11 @@ export default function ChatPage() {
     () => groups.find((group) => group.id === activeGroupId) ?? null,
     [groups, activeGroupId]
   );
+
+  const isGroupAdmin = useMemo(() => {
+    if (!currentUserId || !activeGroup) return false;
+    return (activeGroup.createdBy ?? activeGroup.ownerId ?? null) === currentUserId;
+  }, [activeGroup, currentUserId]);
 
   useEffect(() => {
     if (groups.length === 0) {
@@ -292,6 +359,7 @@ export default function ChatPage() {
     setMemberActionError(null);
     setRemoveMemberError(null);
     setRemovingMemberId(null);
+    setIsMemberManagerOpen(false);
   }, [activeGroupId]);
 
   useEffect(() => {
@@ -389,6 +457,10 @@ export default function ChatPage() {
 
   const handleAddMemberToGroup = async (event) => {
     event.preventDefault();
+    if (!isGroupAdmin) {
+      setMemberActionError("Only the group admin can add members.");
+      return;
+    }
     if (!activeGroupId || !pendingMemberId) {
       setMemberActionError("Pick a teammate to add.");
       return;
@@ -427,6 +499,10 @@ export default function ChatPage() {
   };
 
   const handleRemoveMemberFromGroup = async (memberId) => {
+    if (!isGroupAdmin) {
+      setRemoveMemberError("Only the group admin can remove members.");
+      return;
+    }
     if (!activeGroupId || !memberId) return;
     setRemovingMemberId(memberId);
     setRemoveMemberError(null);
@@ -565,6 +641,99 @@ export default function ChatPage() {
   }, [isSocketReady, currentUserId]);
 
   useEffect(() => {
+    if (!isSocketReady) return;
+
+    const handleSnapshot = (payload) => {
+      if (!Array.isArray(payload)) return;
+      const mapped = payload.reduce((acc, entry) => {
+        if (entry?.userId) {
+          acc[entry.userId] = {
+            status: entry.status ?? "offline",
+            lastSeen: entry.lastSeen ?? Date.now(),
+          };
+        }
+        return acc;
+      }, {});
+      setPresenceMap(mapped);
+    };
+
+    const handleUpdate = (entry) => {
+      if (!entry?.userId) return;
+      setPresenceMap((prev) => ({
+        ...prev,
+        [entry.userId]: {
+          ...(prev[entry.userId] || {}),
+          status: entry.status ?? prev[entry.userId]?.status ?? "offline",
+          lastSeen: entry.lastSeen ?? prev[entry.userId]?.lastSeen ?? Date.now(),
+        },
+      }));
+    };
+
+    const unsubscribeSnapshot = listenForPresenceSnapshots(handleSnapshot);
+    const unsubscribeUpdate = listenForPresenceUpdates(handleUpdate);
+
+    return () => {
+      unsubscribeSnapshot();
+      unsubscribeUpdate();
+    };
+  }, [isSocketReady]);
+
+  useEffect(() => {
+    if (!isSocketReady || !currentUserId) return;
+    const unsubscribe = listenForUnreadCounts((payload) => {
+      if (!payload || payload.userId !== currentUserId) {
+        return;
+      }
+      setUnreadCounts({
+        direct: payload.direct ?? {},
+        group: payload.group ?? {},
+      });
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, [isSocketReady, currentUserId]);
+
+  useEffect(() => {
+    if (!isSocketReady || !currentUserId) return;
+    const unsubscribe = listenForGroupActivity((payload) => {
+      if (!payload?.groupId) return;
+      const memberList = Array.isArray(payload.members) ? payload.members : [];
+      const isMember =
+        memberList.length === 0 ||
+        memberList.includes(currentUserId) ||
+        payload.createdBy === currentUserId;
+      if (!isMember) {
+        return;
+      }
+      setRemoteGroups((prev) => {
+        const normalized = {
+          id: payload.groupId ?? payload.id,
+          name: payload.name ?? payload.groupName ?? "Untitled group",
+          members: memberList,
+          description: payload.description ?? payload.name ?? "Group chat",
+          createdBy: payload.createdBy ?? payload.ownerId ?? null,
+        };
+        const existingIndex = prev.findIndex(
+          (group) => group.id === normalized.id
+        );
+        if (existingIndex === -1) {
+          return [...prev, normalized];
+        }
+        const nextGroups = [...prev];
+        nextGroups[existingIndex] = {
+          ...nextGroups[existingIndex],
+          ...normalized,
+        };
+        return nextGroups;
+      });
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, [isSocketReady, currentUserId]);
+
+  useEffect(() => {
     if (!isSocketReady || !currentUserId) return;
 
     const unsubscribe = listenForDirectMessages((payload) => {
@@ -593,6 +762,157 @@ export default function ChatPage() {
 
     return () => {
       unsubscribe();
+    };
+  }, [isSocketReady, currentUserId]);
+
+  useEffect(() => {
+    if (!isSocketReady || !currentUserId) return;
+    const unsubscribe = listenForDirectAttachments((payload) => {
+      if (!payload) return;
+      const peerId =
+        payload.from === currentUserId ? payload.to : payload.from;
+      if (!peerId || (payload.to !== currentUserId && payload.from !== currentUserId)) {
+        return;
+      }
+      const normalized = createMessageFromPayload(payload, {
+        optimistic: false,
+        status: "sent",
+      });
+      setDirectMessages((prev) => {
+        const history = prev[peerId] ?? [];
+        return {
+          ...prev,
+          [peerId]: mergeMessageHistory(history, normalized, currentUserId),
+        };
+      });
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, [isSocketReady, currentUserId]);
+
+  useEffect(() => {
+    if (!isSocketReady) return;
+    const unsubscribe = listenForGroupAttachments((payload) => {
+      if (!payload?.groupId) return;
+      const isMember = groups.some((group) => group.id === payload.groupId);
+      if (!isMember) return;
+      setGroupMessages((prev) => {
+        const history = prev[payload.groupId] ?? [];
+        return {
+          ...prev,
+          [payload.groupId]: [
+            ...history,
+            createMessageFromPayload(payload, { optimistic: false, status: "sent" }),
+          ],
+        };
+      });
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, [isSocketReady, groups]);
+
+  useEffect(() => {
+    if (!isSocketReady || !currentUserId) return;
+
+    const directUnsubscribe = listenForDirectTyping((payload) => {
+      if (!payload?.from || payload.to !== currentUserId) return;
+      setRemoteTyping((prev) => {
+        const nextDirect = { ...prev.direct };
+        if (payload.isTyping) {
+          nextDirect[payload.from] = true;
+        } else {
+          delete nextDirect[payload.from];
+        }
+        return { ...prev, direct: nextDirect };
+      });
+      const timers = remoteTypingTimersRef.current.direct;
+      const existingTimer = timers.get(payload.from);
+      if (existingTimer) {
+        clearTimeout(existingTimer);
+      }
+      if (payload.isTyping) {
+        const timeoutId = setTimeout(() => {
+          setRemoteTyping((prev) => {
+            const nextDirect = { ...prev.direct };
+            delete nextDirect[payload.from];
+            return { ...prev, direct: nextDirect };
+          });
+          timers.delete(payload.from);
+        }, 4000);
+        timers.set(payload.from, timeoutId);
+      } else {
+        timers.delete(payload.from);
+      }
+    });
+
+    const groupUnsubscribe = listenForGroupTyping((payload) => {
+      if (!payload?.groupId || payload.from === currentUserId) return;
+      setRemoteTyping((prev) => {
+        const nextGroup = { ...prev.group };
+        const existing = { ...(nextGroup[payload.groupId] ?? {}) };
+        if (payload.isTyping) {
+          existing[payload.from] = true;
+        } else {
+          delete existing[payload.from];
+        }
+        if (Object.keys(existing).length === 0) {
+          delete nextGroup[payload.groupId];
+        } else {
+          nextGroup[payload.groupId] = existing;
+        }
+        return { ...prev, group: nextGroup };
+      });
+      const groupTimers = remoteTypingTimersRef.current.group;
+      const userTimers =
+        groupTimers.get(payload.groupId) ?? new Map();
+      if (!groupTimers.has(payload.groupId)) {
+        groupTimers.set(payload.groupId, userTimers);
+      }
+      const existingTimer = userTimers.get(payload.from);
+      if (existingTimer) {
+        clearTimeout(existingTimer);
+      }
+      if (payload.isTyping) {
+        const timeoutId = setTimeout(() => {
+          setRemoteTyping((prev) => {
+            const groupState = { ...(prev.group[payload.groupId] ?? {}) };
+            delete groupState[payload.from];
+            return {
+              ...prev,
+              group: {
+                ...prev.group,
+                [payload.groupId]: groupState,
+              },
+            };
+          });
+          userTimers.delete(payload.from);
+          if (userTimers.size === 0) {
+            groupTimers.delete(payload.groupId);
+          }
+        }, 4000);
+        userTimers.set(payload.from, timeoutId);
+      } else {
+        userTimers.delete(payload.from);
+        if (userTimers.size === 0) {
+          groupTimers.delete(payload.groupId);
+        }
+      }
+    });
+
+    const directTimers = remoteTypingTimersRef.current.direct;
+    const groupTimers = remoteTypingTimersRef.current.group;
+
+    return () => {
+      directUnsubscribe();
+      groupUnsubscribe();
+      directTimers.forEach((timer) => clearTimeout(timer));
+      groupTimers.forEach((map) => {
+        map.forEach((timer) => clearTimeout(timer));
+      });
+      directTimers.clear();
+      groupTimers.clear();
     };
   }, [isSocketReady, currentUserId]);
 
@@ -672,19 +992,120 @@ export default function ChatPage() {
   }, [currentUserId, activeGroupId]);
 
   useEffect(() => {
-    if (!isSocketReady || !currentUserId || !activeContactId) return;
-    joinDirectRoom(currentUserId, activeContactId);
-  }, [activeContactId, currentUserId, isSocketReady]);
+    if (!isSocketReady || !currentUserId) {
+      return;
+    }
+    const typingRef = localTypingRef.current;
+    if (activeRoster === "direct" && activeContactId) {
+      joinDirectRoom(currentUserId, activeContactId);
+      previousDirectPeerRef.current = activeContactId;
+      return () => {
+        if (currentUserId) {
+          emitDirectTyping({ from: currentUserId, to: activeContactId, isTyping: false });
+        }
+        typingRef.direct = false;
+        leaveDirectRoom(currentUserId, activeContactId);
+        previousDirectPeerRef.current = null;
+      };
+    }
+    if (previousDirectPeerRef.current) {
+      leaveDirectRoom(currentUserId, previousDirectPeerRef.current);
+      previousDirectPeerRef.current = null;
+    }
+  }, [activeRoster, activeContactId, currentUserId, isSocketReady]);
 
   useEffect(() => {
-    if (!isSocketReady || !currentUserId || !activeGroupId) return;
+    if (!isSocketReady || !currentUserId || groups.length === 0) return;
+    groups.forEach((group) => {
+      if (group?.id) {
+        joinGroupRoom(group.id, currentUserId);
+      }
+    });
+  }, [groups, currentUserId, isSocketReady]);
 
-    joinGroupRoom(activeGroupId, currentUserId);
+  useEffect(() => {
+    if (!isSocketReady || !currentUserId) {
+      return;
+    }
+    const typingRef = localTypingRef.current;
+    if (activeRoster === "group" && activeGroupId) {
+      focusGroupRoom(activeGroupId, currentUserId);
+      return () => {
+        if (activeGroupId) {
+          emitGroupTyping({
+            groupId: activeGroupId,
+            from: currentUserId,
+            isTyping: false,
+          });
+        }
+        typingRef.group = false;
+        blurGroupRoom(currentUserId);
+      };
+    }
+    if (activeGroupId) {
+      emitGroupTyping({
+        groupId: activeGroupId,
+        from: currentUserId,
+        isTyping: false,
+      });
+    }
+    typingRef.group = false;
+    blurGroupRoom(currentUserId);
+  }, [activeRoster, activeGroupId, currentUserId, isSocketReady]);
 
+  useEffect(() => {
     return () => {
-      leaveGroupRoom(activeGroupId, currentUserId);
+      if (localTypingTimerRef.current) {
+        clearTimeout(localTypingTimerRef.current);
+      }
     };
-  }, [activeGroupId, currentUserId, isSocketReady]);
+  }, []);
+
+  const stopLocalTyping = (options = {}) => {
+    if (localTypingTimerRef.current) {
+      clearTimeout(localTypingTimerRef.current);
+      localTypingTimerRef.current = null;
+    }
+    if (activeRoster === "direct") {
+      const peerId = options.peerId || activeContactId;
+      if (peerId && currentUserId) {
+        emitDirectTyping({ from: currentUserId, to: peerId, isTyping: false });
+      }
+      localTypingRef.current.direct = false;
+    } else if (activeRoster === "group") {
+      const groupId = options.groupId || activeGroupId;
+      if (groupId && currentUserId) {
+        emitGroupTyping({ groupId, from: currentUserId, isTyping: false });
+      }
+      localTypingRef.current.group = false;
+    }
+  };
+
+  const handleComposerChange = (event) => {
+    const value = event.target.value;
+    setMessageInput(value);
+    if (!value.trim()) {
+      stopLocalTyping();
+      return;
+    }
+    if (activeRoster === "direct" && activeContactId && currentUserId) {
+      if (!localTypingRef.current.direct) {
+        emitDirectTyping({ from: currentUserId, to: activeContactId, isTyping: true });
+        localTypingRef.current.direct = true;
+      }
+    } else if (activeRoster === "group" && activeGroupId && currentUserId) {
+      if (!localTypingRef.current.group) {
+        emitGroupTyping({ groupId: activeGroupId, from: currentUserId, isTyping: true });
+        localTypingRef.current.group = true;
+      }
+    }
+    if (localTypingTimerRef.current) {
+      clearTimeout(localTypingTimerRef.current);
+    }
+    localTypingTimerRef.current = setTimeout(() => {
+      stopLocalTyping();
+    }, 1600);
+  };
 
   const handleSendMessage = (event) => {
     event.preventDefault();
@@ -693,9 +1114,7 @@ export default function ChatPage() {
       setMessageInput("");
       return;
     }
-    const instance = socketRef.current;
     if (activeRoster === "group" && activeGroupId) {
-      if (!instance) return;
       const payload = {
         groupId: activeGroupId,
         from: currentUserId,
@@ -711,7 +1130,6 @@ export default function ChatPage() {
           ],
         };
       });
-      emitGroupMessage(payload);
       sendGroupMessageViaApi(payload).catch((error) => {
         console.error("[chat] group REST send failed", error);
       });
@@ -736,7 +1154,6 @@ export default function ChatPage() {
           ],
         };
       });
-      emitDirectMessage(payload);
       sendDirectMessageViaApi({
         from: payload.from,
         to: payload.to,
@@ -751,6 +1168,7 @@ export default function ChatPage() {
     }
 
     setMessageInput("");
+    stopLocalTyping();
   };
 
   const currentMessages =
@@ -766,6 +1184,18 @@ export default function ChatPage() {
 
   const canSendToRoom =
     activeRoster === "group" ? Boolean(activeGroupId) : Boolean(activeContactId);
+
+  const directTypingActive =
+    activeRoster === "direct" &&
+    activeContactId &&
+    Boolean(remoteTyping.direct[activeContactId]);
+
+  const groupTypingNames =
+    activeRoster === "group" && activeGroupId
+      ? Object.keys(remoteTyping.group[activeGroupId] ?? {}).filter(
+          (memberId) => memberId !== currentUserId
+        )
+      : [];
 
   if (!router.isReady || !currentUserId) {
     return (
@@ -852,7 +1282,14 @@ export default function ChatPage() {
                     ...(group.id === activeGroupId ? styles.roomButtonActive : {}),
                   }}
                 >
-                  <strong>{group.name}</strong>
+                  <div style={styles.roomHeader}>
+                    <strong>{group.name}</strong>
+                    {unreadCounts.group?.[group.id] > 0 && (
+                      <span style={styles.unreadBadge}>
+                        {unreadCounts.group[group.id]}
+                      </span>
+                    )}
+                  </div>
                   <span style={styles.roomDescription}>{group.description}</span>
                   <span style={styles.roomMeta}>
                     {group.members.length} members
@@ -872,7 +1309,29 @@ export default function ChatPage() {
                     ...(contact.id === activeContactId ? styles.roomButtonActive : {}),
                   }}
                 >
-                  <strong>{contact.name}</strong>
+                  <div style={styles.roomHeader}>
+                    <strong>{contact.name}</strong>
+                    <div style={styles.roomStatus}>
+                      <span
+                        style={{
+                          ...styles.presenceDot,
+                          background:
+                            presenceMap[contact.id]?.status === "online"
+                              ? "#22c55e"
+                              : "#facc15",
+                        }}
+                        title={presenceMap[contact.id]?.status ?? "offline"}
+                      />
+                      <span style={styles.presenceLabel}>
+                        {presenceMap[contact.id]?.status ?? "offline"}
+                      </span>
+                      {unreadCounts.direct?.[contact.id] > 0 && (
+                        <span style={styles.unreadBadge}>
+                          {unreadCounts.direct[contact.id]}
+                        </span>
+                      )}
+                    </div>
+                  </div>
                   <span style={styles.roomDescription}>{contact.role}</span>
                 </button>
               ))}
@@ -973,14 +1432,39 @@ export default function ChatPage() {
         {activeRoster === "group" && activeGroup && (
           <div style={styles.groupMetaHud}>
             <div style={styles.memberListSection}>
-              <p style={styles.groupEyebrow}>
-                Members ({activeGroup.members.length})
-              </p>
+              <div style={styles.memberListHeader}>
+                <p style={styles.groupEyebrow}>
+                  Members ({activeGroup.members.length})
+                </p>
+                {isGroupAdmin && (
+                  <button
+                    type="button"
+                    title="Add member"
+                    style={styles.memberAddToggle}
+                    onClick={() =>
+                      setIsMemberManagerOpen((previous) => !previous)
+                    }
+                  >
+                    {isMemberManagerOpen ? "×" : "+"}
+                  </button>
+                )}
+              </div>
               <div style={styles.memberChipList}>
                 {activeGroup.members.map((memberId) => (
                   <div key={memberId} style={styles.memberChip}>
-                    <span>{lookupName(memberId)}</span>
-                    {memberId !== currentUserId && (
+                    <span style={styles.memberName}>
+                      <span
+                        style={{
+                          ...styles.presenceDot,
+                          background:
+                            presenceMap[memberId]?.status === "online"
+                              ? "#22c55e"
+                              : "#facc15",
+                        }}
+                      />
+                      {lookupName(memberId)}
+                    </span>
+                    {isGroupAdmin && memberId !== currentUserId && (
                       <button
                         type="button"
                         style={styles.memberRemoveButton}
@@ -997,36 +1481,41 @@ export default function ChatPage() {
                 <p style={styles.formError}>{removeMemberError}</p>
               )}
             </div>
-            <form style={styles.memberAddForm} onSubmit={handleAddMemberToGroup}>
-              <label style={styles.groupFormLabel}>
-                Add teammate
-                <select
-                  style={styles.groupFormInput}
-                  value={pendingMemberId}
-                  onChange={(event) => setPendingMemberId(event.target.value)}
-                >
-                  <option value="">Select teammate...</option>
-                  {availableMembersToAdd.map((user) => (
-                    <option key={user.id} value={user.id}>
-                      {user.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {memberActionError && (
-                <p style={styles.formError}>{memberActionError}</p>
-              )}
-              <button
-                type="submit"
-                style={{
-                  ...styles.secondaryButton,
-                  opacity: !pendingMemberId || isAddingMember ? 0.6 : 1,
-                }}
-                disabled={!pendingMemberId || isAddingMember}
+            {isGroupAdmin && isMemberManagerOpen && (
+              <form
+                style={styles.memberAddForm}
+                onSubmit={handleAddMemberToGroup}
               >
-                {isAddingMember ? "Adding..." : "Add member"}
-              </button>
-            </form>
+                <label style={styles.groupFormLabel}>
+                  Add teammate
+                  <select
+                    style={styles.groupFormInput}
+                    value={pendingMemberId}
+                    onChange={(event) => setPendingMemberId(event.target.value)}
+                  >
+                    <option value="">Select teammate...</option>
+                    {availableMembersToAdd.map((user) => (
+                      <option key={user.id} value={user.id}>
+                        {user.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {memberActionError && (
+                  <p style={styles.formError}>{memberActionError}</p>
+                )}
+                <button
+                  type="submit"
+                  style={{
+                    ...styles.secondaryButton,
+                    opacity: !pendingMemberId || isAddingMember ? 0.6 : 1,
+                  }}
+                  disabled={!pendingMemberId || isAddingMember}
+                >
+                  {isAddingMember ? "Adding..." : "Add member"}
+                </button>
+              </form>
+            )}
           </div>
         )}
 
@@ -1086,6 +1575,22 @@ export default function ChatPage() {
                     )}
                   </div>
                   <p style={styles.messageBody}>{message.message}</p>
+                  {Array.isArray(message.attachments) &&
+                    message.attachments.length > 0 && (
+                      <div style={styles.attachmentCard}>
+                        {message.attachments.map((attachment, index) => (
+                          <div key={`${attachment.name || attachment.fileName || "attachment"}-${index}`}>
+                            <p style={{ margin: 0, fontWeight: 600 }}>
+                              📎 {attachment.name || attachment.fileName || "Attachment"}
+                            </p>
+                            <p style={{ margin: "2px 0 0", fontSize: "0.8rem", color: "#cbd5f5" }}>
+                              {attachment.mimeType || "file"} ·{" "}
+                              {formatFileSize(attachment.size)}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   {isActionActive && (
                     <div style={styles.messageActions}>
                       {messageActionError && (
@@ -1123,6 +1628,20 @@ export default function ChatPage() {
           )}
         </div>
 
+        {(directTypingActive || groupTypingNames.length > 0) && (
+          <div style={styles.typingIndicator}>
+            {directTypingActive ? (
+              <p>{`${lookupName(activeContactId)} is typing...`}</p>
+            ) : (
+              <p>
+                {groupTypingNames.length === 1
+                  ? `${lookupName(groupTypingNames[0])} is typing...`
+                  : `${groupTypingNames.length} teammates are typing...`}
+              </p>
+            )}
+          </div>
+        )}
+
         <form style={styles.composer} onSubmit={handleSendMessage}>
           <textarea
             style={styles.textarea}
@@ -1132,7 +1651,7 @@ export default function ChatPage() {
                 : "Message this teammate..."
             }
             value={messageInput}
-            onChange={(event) => setMessageInput(event.target.value)}
+            onChange={handleComposerChange}
             rows={2}
           />
           <button
@@ -1315,6 +1834,39 @@ const styles = {
     textAlign: "left",
     cursor: "pointer",
   },
+  roomHeader: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    width: "100%",
+  },
+  roomStatus: {
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+  },
+  presenceDot: {
+    width: 10,
+    height: 10,
+    borderRadius: "50%",
+    display: "inline-block",
+  },
+  presenceLabel: {
+    fontSize: "0.75rem",
+    textTransform: "capitalize",
+    color: "#cbd5f5",
+  },
+  unreadBadge: {
+    minWidth: 20,
+    padding: "2px 6px",
+    borderRadius: 999,
+    background: "#f97316",
+    color: "#0f172a",
+    fontSize: "0.75rem",
+    fontWeight: 600,
+    textAlign: "center",
+  },
   roomButtonActive: {
     borderColor: "#c4b5fd",
     background: "rgba(79,70,229,0.2)",
@@ -1362,12 +1914,29 @@ const styles = {
     flexDirection: "column",
     gap: 8,
   },
+  memberListHeader: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
   groupEyebrow: {
     margin: 0,
     textTransform: "uppercase",
     letterSpacing: 1,
     fontSize: "0.75rem",
     color: "#94a3b8",
+  },
+  memberAddToggle: {
+    borderRadius: "50%",
+    width: 28,
+    height: 28,
+    border: "1px solid rgba(124,58,237,0.5)",
+    background: "rgba(124,58,237,0.15)",
+    color: "#e2e8f0",
+    cursor: "pointer",
+    fontSize: "1rem",
+    lineHeight: "1rem",
   },
   memberChipList: {
     display: "flex",
@@ -1383,6 +1952,11 @@ const styles = {
     display: "inline-flex",
     alignItems: "center",
     gap: 8,
+  },
+  memberName: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
   },
   memberRemoveButton: {
     border: "none",
@@ -1423,6 +1997,12 @@ const styles = {
     margin: "auto",
     color: "#94a3b8",
   },
+  typingIndicator: {
+    padding: "4px 12px",
+    color: "#c7d2fe",
+    fontSize: "0.85rem",
+    minHeight: 24,
+  },
   messageBubble: {
     padding: 12,
     borderRadius: 16,
@@ -1446,6 +2026,14 @@ const styles = {
   messageBody: {
     margin: 0,
     lineHeight: 1.4,
+  },
+  attachmentCard: {
+    marginTop: 8,
+    padding: 10,
+    borderRadius: 12,
+    background: "rgba(15,23,42,0.5)",
+    border: "1px solid rgba(148,163,184,0.3)",
+    fontSize: "0.85rem",
   },
   messageActions: {
     marginTop: 8,

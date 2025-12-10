@@ -1,17 +1,50 @@
 import type { Socket } from "socket.io-client";
 import defaultSocket, {
   SOCKET_EVENTS,
+  blurGroupRoom,
+  focusGroupRoom,
   getSocket,
   joinDirectRoom,
   joinGroupRoom,
+  leaveDirectRoom,
   leaveGroupRoom,
+  listenForDirectAttachments,
   listenForDirectMessages,
+  listenForDirectTyping,
+  listenForGroupActivity,
+  listenForGroupAttachments,
   listenForGroupMessages,
+  listenForGroupTyping,
+  listenForPresenceSnapshots,
+  listenForPresenceUpdates,
+  listenForUnreadCounts,
   registerUser,
-  sendDirectMessage,
-  sendGroupMessage,
+  sendDirectTyping,
+  sendGroupTyping,
 } from "../../utils/socket";
 
-export { SOCKET_EVENTS, getSocket, joinDirectRoom, joinGroupRoom, leaveGroupRoom, listenForDirectMessages, listenForGroupMessages, registerUser, sendDirectMessage, sendGroupMessage };
+export {
+  SOCKET_EVENTS,
+  blurGroupRoom,
+  focusGroupRoom,
+  getSocket,
+  joinDirectRoom,
+  joinGroupRoom,
+  leaveDirectRoom,
+  leaveGroupRoom,
+  listenForDirectAttachments,
+  listenForDirectMessages,
+  listenForDirectTyping,
+  listenForGroupActivity,
+  listenForGroupAttachments,
+  listenForGroupMessages,
+  listenForGroupTyping,
+  listenForPresenceSnapshots,
+  listenForPresenceUpdates,
+  listenForUnreadCounts,
+  registerUser,
+  sendDirectTyping,
+  sendGroupTyping,
+};
 export type { Socket };
 export default defaultSocket as Socket | null;

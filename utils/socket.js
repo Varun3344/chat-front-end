@@ -22,18 +22,31 @@ const SOCKET_URL =
 export const SOCKET_EVENTS = {
   REGISTER_USER: "register_user",
   JOIN_DIRECT_ROOM: "join_direct_room",
+  LEAVE_DIRECT_ROOM: "leave_direct_room",
   SEND_DIRECT_MESSAGE: "send_direct_message",
   RECEIVE_DIRECT_MESSAGE: "receive_direct_message",
   JOIN_GROUP_ROOM: "join_group_room",
   LEAVE_GROUP_ROOM: "leave_group_room",
   SEND_GROUP_MESSAGE: "send_group_message",
   RECEIVE_GROUP_MESSAGE: "receive_group_message",
+  DIRECT_TYPING: "direct_typing",
+  GROUP_TYPING: "group_typing",
+  DIRECT_ATTACHMENT: "direct_attachment_uploaded",
+  GROUP_ATTACHMENT: "group_attachment_uploaded",
+  PRESENCE_SNAPSHOT: "presence_snapshot",
+  PRESENCE_UPDATE: "user_presence",
+  UNREAD_COUNTS: "unread_counts",
+  GROUP_ACTIVITY: "group_created",
+  FOCUS_GROUP_ROOM: "focus_group_room",
+  BLUR_GROUP_ROOM: "blur_group_room",
 };
 
 const subscriptions = {
   userId: null,
   directRooms: new Map(),
   groupRooms: new Map(),
+  activeDirectKey: null,
+  activeGroupId: null,
 };
 
 let socket = null;
@@ -58,6 +71,12 @@ const syncSubscriptions = (instance) => {
   subscriptions.groupRooms.forEach((payload) => {
     instance.emit(SOCKET_EVENTS.JOIN_GROUP_ROOM, payload);
   });
+  if (subscriptions.activeGroupId) {
+    instance.emit(SOCKET_EVENTS.FOCUS_GROUP_ROOM, {
+      groupId: subscriptions.activeGroupId,
+      userId: subscriptions.userId ?? undefined,
+    });
+  }
 };
 
 export const getSocket = () => {
@@ -100,8 +119,21 @@ export const joinDirectRoom = (userA, userB) => {
   const payload = { userA, userB };
   const roomKey = `${userA}::${userB}`;
   subscriptions.directRooms.set(roomKey, payload);
+  subscriptions.activeDirectKey = roomKey;
   instance.emit(SOCKET_EVENTS.JOIN_DIRECT_ROOM, payload);
   return payload;
+};
+
+export const leaveDirectRoom = (userA, userB) => {
+  if (!userA || !userB) return;
+  const instance = ensureSocket();
+  if (!instance) return;
+  const roomKey = `${userA}::${userB}`;
+  subscriptions.directRooms.delete(roomKey);
+  if (subscriptions.activeDirectKey === roomKey) {
+    subscriptions.activeDirectKey = null;
+  }
+  instance.emit(SOCKET_EVENTS.LEAVE_DIRECT_ROOM, { userA, userB });
 };
 
 export const joinGroupRoom = (groupId, userId) => {
@@ -117,6 +149,28 @@ export const joinGroupRoom = (groupId, userId) => {
   return payload;
 };
 
+export const focusGroupRoom = (groupId, userId) => {
+  if (!groupId) return null;
+  const instance = ensureSocket();
+  if (!instance) return null;
+  const payload = {
+    groupId,
+    userId: userId || subscriptions.userId || undefined,
+  };
+  subscriptions.activeGroupId = groupId;
+  instance.emit(SOCKET_EVENTS.FOCUS_GROUP_ROOM, payload);
+  return payload;
+};
+
+export const blurGroupRoom = (userId) => {
+  const instance = ensureSocket();
+  if (!instance) return null;
+  subscriptions.activeGroupId = null;
+  instance.emit(SOCKET_EVENTS.BLUR_GROUP_ROOM, {
+    userId: userId || subscriptions.userId || undefined,
+  });
+};
+
 export const leaveGroupRoom = (groupId, userId) => {
   if (!groupId) return null;
   const instance = ensureSocket();
@@ -128,35 +182,26 @@ export const leaveGroupRoom = (groupId, userId) => {
   });
 };
 
-export const sendDirectMessage = ({
-  from,
-  to,
-  message,
-  clientMessageId,
-  metadata,
-}) => {
-  if (!from || !to || !message) return null;
+export const sendDirectTyping = ({ from, to, isTyping }) => {
+  if (!to) return null;
   const instance = ensureSocket();
   if (!instance) return null;
-  instance.emit(SOCKET_EVENTS.SEND_DIRECT_MESSAGE, {
-    from,
+  instance.emit(SOCKET_EVENTS.DIRECT_TYPING, {
+    from: from || subscriptions.userId || undefined,
     to,
-    message,
-    clientMessageId,
-    metadata,
+    isTyping: Boolean(isTyping),
   });
   return instance;
 };
 
-export const sendGroupMessage = ({ groupId, from, message, metadata }) => {
-  if (!groupId || !from || !message) return null;
+export const sendGroupTyping = ({ groupId, from, isTyping }) => {
+  if (!groupId) return null;
   const instance = ensureSocket();
   if (!instance) return null;
-  instance.emit(SOCKET_EVENTS.SEND_GROUP_MESSAGE, {
+  instance.emit(SOCKET_EVENTS.GROUP_TYPING, {
     groupId,
-    from,
-    message,
-    metadata,
+    from: from || subscriptions.userId || undefined,
+    isTyping: Boolean(isTyping),
   });
   return instance;
 };
@@ -188,6 +233,25 @@ export const listenForGroupMessages = (handler) => {
     instance.off(SOCKET_EVENTS.RECEIVE_GROUP_MESSAGE, listener);
   };
 };
+
+const createListener = (eventName) => (handler) => {
+  const instance = ensureSocket();
+  if (!instance || typeof handler !== "function") {
+    return () => {};
+  }
+  const listener = (payload) => handler(payload);
+  instance.on(eventName, listener);
+  return () => instance.off(eventName, listener);
+};
+
+export const listenForDirectTyping = createListener(SOCKET_EVENTS.DIRECT_TYPING);
+export const listenForGroupTyping = createListener(SOCKET_EVENTS.GROUP_TYPING);
+export const listenForDirectAttachments = createListener(SOCKET_EVENTS.DIRECT_ATTACHMENT);
+export const listenForGroupAttachments = createListener(SOCKET_EVENTS.GROUP_ATTACHMENT);
+export const listenForPresenceSnapshots = createListener(SOCKET_EVENTS.PRESENCE_SNAPSHOT);
+export const listenForPresenceUpdates = createListener(SOCKET_EVENTS.PRESENCE_UPDATE);
+export const listenForUnreadCounts = createListener(SOCKET_EVENTS.UNREAD_COUNTS);
+export const listenForGroupActivity = createListener(SOCKET_EVENTS.GROUP_ACTIVITY);
 
 const defaultSocket = getSocket();
 
