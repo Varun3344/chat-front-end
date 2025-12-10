@@ -3,11 +3,15 @@ import { useRouter } from "next/router";
 import {
   fetchDirectMessagesViaApi,
   sendDirectMessageViaApi,
+  deleteDirectMessageViaApi,
 } from "src/lib/client/directMessages";
 import {
   fetchGroupMessagesViaApi,
   listGroupsViaApi,
   sendGroupMessageViaApi,
+  createGroupViaApi,
+  addGroupMemberViaApi,
+  removeGroupMemberViaApi,
 } from "src/lib/client/groupMessages";
 import { USERS } from "../data/dummyData";
 import socket, {
@@ -168,8 +172,22 @@ export default function ChatPage() {
   const [messageInput, setMessageInput] = useState("");
   const [connectionState, setConnectionState] = useState("connecting");
   const [isSocketReady, setIsSocketReady] = useState(false);
+  const [isCreatingGroup, setIsCreatingGroup] = useState(false);
+  const [newGroupName, setNewGroupName] = useState("");
+  const [newGroupMembers, setNewGroupMembers] = useState([]);
+  const [groupFormStatus, setGroupFormStatus] = useState(null);
+  const [isSubmittingGroup, setIsSubmittingGroup] = useState(false);
+  const [pendingMemberId, setPendingMemberId] = useState("");
+  const [isAddingMember, setIsAddingMember] = useState(false);
+  const [memberActionError, setMemberActionError] = useState(null);
+  const [removingMemberId, setRemovingMemberId] = useState(null);
+  const [removeMemberError, setRemoveMemberError] = useState(null);
+  const [messageActionTarget, setMessageActionTarget] = useState(null);
+  const [messageActionError, setMessageActionError] = useState(null);
+  const [isDeletingMessageId, setIsDeletingMessageId] = useState(null);
 
   const socketRef = useRef(socket);
+  const messageActionTimerRef = useRef(null);
 
   useEffect(() => {
     if (!router.isReady) return;
@@ -243,6 +261,11 @@ export default function ChatPage() {
       }));
   }, [currentUserId, remoteGroups]);
 
+  const activeGroup = useMemo(
+    () => groups.find((group) => group.id === activeGroupId) ?? null,
+    [groups, activeGroupId]
+  );
+
   useEffect(() => {
     if (groups.length === 0) {
       setActiveGroupId(null);
@@ -263,6 +286,249 @@ export default function ChatPage() {
       setActiveRoster(groups.length > 0 ? "group" : "direct");
     }
   }, [activeRoster, contacts.length, groups.length]);
+
+  useEffect(() => {
+    setPendingMemberId("");
+    setMemberActionError(null);
+    setRemoveMemberError(null);
+    setRemovingMemberId(null);
+  }, [activeGroupId]);
+
+  useEffect(() => {
+    setMessageActionTarget(null);
+    setMessageActionError(null);
+    setIsDeletingMessageId(null);
+    if (messageActionTimerRef.current) {
+      clearTimeout(messageActionTimerRef.current);
+    }
+  }, [activeContactId, activeRoster]);
+
+  const resetGroupForm = () => {
+    setNewGroupName("");
+    setNewGroupMembers([]);
+    setGroupFormStatus(null);
+    setIsCreatingGroup(false);
+  };
+
+  const handleMemberSelection = (memberId) => {
+    if (!memberId) return;
+    setNewGroupMembers((prev) => {
+      const exists = prev.includes(memberId);
+      if (exists) {
+        return prev.filter((id) => id !== memberId);
+      }
+      return [...prev, memberId];
+    });
+  };
+
+  const handleCreateGroup = async (event) => {
+    event.preventDefault();
+    if (!currentUserId) {
+      setGroupFormStatus("Pick a user before creating a group.");
+      return;
+    }
+    const trimmed = newGroupName.trim();
+    if (!trimmed) {
+      setGroupFormStatus("Group name is required.");
+      return;
+    }
+    setIsSubmittingGroup(true);
+    setGroupFormStatus(null);
+    try {
+      const response = await createGroupViaApi({
+        groupName: trimmed,
+        createdBy: currentUserId,
+      });
+      const groupId =
+        response?.groupId ??
+        response?.data?.groupId ??
+        `group-${Date.now().toString(36)}`;
+      const uniqueMembers = Array.from(
+        new Set([currentUserId, ...newGroupMembers])
+      );
+      const membersToAdd = uniqueMembers.filter(
+        (memberId) => memberId !== currentUserId
+      );
+      if (membersToAdd.length > 0) {
+        await Promise.all(
+          membersToAdd.map((memberId) =>
+            addGroupMemberViaApi({ groupId, memberId }).catch((error) => {
+              console.error("[chat] add member during create failed", error);
+            })
+          )
+        );
+      }
+      const nextGroup = {
+        id: groupId,
+        name: trimmed,
+        description: `Created by ${lookupName(currentUserId)}`,
+        members: uniqueMembers,
+      };
+      setRemoteGroups((prev) => [...prev, nextGroup]);
+      setActiveGroupId(groupId);
+      setActiveRoster("group");
+      setGroupMessages((prev) => ({ ...prev, [groupId]: [] }));
+      resetGroupForm();
+    } catch (error) {
+      console.error("[chat] create group failed", error);
+      setGroupFormStatus(
+        error instanceof Error ? error.message : "Failed to create group."
+      );
+    } finally {
+      setIsSubmittingGroup(false);
+    }
+  };
+
+  const availableMembersToAdd = useMemo(() => {
+    if (!activeGroup) return [];
+    const memberSet = new Set(activeGroup.members ?? []);
+    return USERS.filter(
+      (user) => !memberSet.has(user.id) && user.id !== currentUserId
+    );
+  }, [activeGroup, currentUserId]);
+
+  const handleAddMemberToGroup = async (event) => {
+    event.preventDefault();
+    if (!activeGroupId || !pendingMemberId) {
+      setMemberActionError("Pick a teammate to add.");
+      return;
+    }
+    setIsAddingMember(true);
+    setMemberActionError(null);
+    try {
+      await addGroupMemberViaApi({
+        groupId: activeGroupId,
+        memberId: pendingMemberId,
+      });
+      setRemoteGroups((prev) =>
+        prev.map((group) => {
+          if (group.id !== activeGroupId) return group;
+          const existingMembers = Array.isArray(group.members)
+            ? group.members
+            : [];
+          if (existingMembers.includes(pendingMemberId)) {
+            return group;
+          }
+          return {
+            ...group,
+            members: [...existingMembers, pendingMemberId],
+          };
+        })
+      );
+      setPendingMemberId("");
+    } catch (error) {
+      console.error("[chat] add member failed", error);
+      setMemberActionError(
+        error instanceof Error ? error.message : "Unable to add member."
+      );
+    } finally {
+      setIsAddingMember(false);
+    }
+  };
+
+  const handleRemoveMemberFromGroup = async (memberId) => {
+    if (!activeGroupId || !memberId) return;
+    setRemovingMemberId(memberId);
+    setRemoveMemberError(null);
+    try {
+      await removeGroupMemberViaApi({
+        groupId: activeGroupId,
+        memberId,
+      });
+      setRemoteGroups((prev) =>
+        prev.map((group) => {
+          if (group.id !== activeGroupId) return group;
+          const members = Array.isArray(group.members) ? group.members : [];
+          return {
+            ...group,
+            members: members.filter((id) => id !== memberId),
+          };
+        })
+      );
+      if (pendingMemberId === memberId) {
+        setPendingMemberId("");
+      }
+    } catch (error) {
+      console.error("[chat] remove member failed", error);
+      setRemoveMemberError(
+        error instanceof Error ? error.message : "Unable to remove member."
+      );
+    } finally {
+      setRemovingMemberId(null);
+    }
+  };
+
+  const markMessageActionTarget = (message) => {
+    if (activeRoster !== "direct" || !message?.id) return;
+    setMessageActionTarget({
+      messageId: message.id,
+      clientMessageId: message.clientMessageId ?? null,
+      peerId: activeContactId,
+    });
+    setMessageActionError(null);
+  };
+
+  const beginMessageActionCountdown = (message) => {
+    if (activeRoster !== "direct" || !message?.id) return;
+    if (messageActionTimerRef.current) {
+      clearTimeout(messageActionTimerRef.current);
+    }
+    messageActionTimerRef.current = setTimeout(() => {
+      markMessageActionTarget(message);
+    }, 600);
+  };
+
+  const cancelMessageActionCountdown = () => {
+    if (messageActionTimerRef.current) {
+      clearTimeout(messageActionTimerRef.current);
+    }
+  };
+
+  const handleDeleteSelectedMessage = async () => {
+    if (
+      !currentUserId ||
+      !messageActionTarget?.messageId ||
+      !messageActionTarget?.peerId
+    ) {
+      return;
+    }
+    const { messageId, clientMessageId, peerId } = messageActionTarget;
+    setIsDeletingMessageId(messageId);
+    setMessageActionError(null);
+    try {
+      await deleteDirectMessageViaApi({ messageId });
+      setDirectMessages((prev) => {
+        const history = prev[peerId] ?? [];
+        const filtered = history.filter((message) => {
+          if (message.id && message.id === messageId) {
+            return false;
+          }
+          if (clientMessageId && message.clientMessageId === clientMessageId) {
+            return false;
+          }
+          return true;
+        });
+        return {
+          ...prev,
+          [peerId]: filtered,
+        };
+      });
+      setMessageActionTarget(null);
+    } catch (error) {
+      console.error("[chat] delete message failed", error);
+      setMessageActionError(
+        error instanceof Error ? error.message : "Unable to delete message."
+      );
+    } finally {
+      setIsDeletingMessageId(null);
+    }
+  };
+
+  const dismissMessageAction = () => {
+    setMessageActionTarget(null);
+    setMessageActionError(null);
+    cancelMessageActionCountdown();
+  };
 
   useEffect(() => {
     const instance = socketRef.current ?? getSocket();
@@ -287,6 +553,9 @@ export default function ChatPage() {
     return () => {
       instance.off("connect", handleConnect);
       instance.off("disconnect", handleDisconnect);
+      if (messageActionTimerRef.current) {
+        clearTimeout(messageActionTimerRef.current);
+      }
     };
   }, []);
 
@@ -619,6 +888,75 @@ export default function ChatPage() {
             </p>
           )}
         </div>
+
+        {activeRoster === "group" && (
+          <div style={styles.groupCreator}>
+            {!isCreatingGroup ? (
+              <button
+                type="button"
+                style={styles.groupCreatorButton}
+                onClick={() => {
+                  setIsCreatingGroup(true);
+                  setGroupFormStatus(null);
+                }}
+              >
+                + Create group
+              </button>
+            ) : (
+              <form style={styles.groupForm} onSubmit={handleCreateGroup}>
+                <label style={styles.groupFormLabel}>
+                  Group name
+                  <input
+                    style={styles.groupFormInput}
+                    value={newGroupName}
+                    onChange={(event) => setNewGroupName(event.target.value)}
+                    placeholder="eg. Marketing sync"
+                  />
+                </label>
+                <p style={styles.groupFormLabel}>Members</p>
+                <div style={styles.groupMemberChecklist}>
+                  {contacts.map((contact) => (
+                    <label key={contact.id} style={styles.groupMemberOption}>
+                      <input
+                        type="checkbox"
+                        checked={newGroupMembers.includes(contact.id)}
+                        onChange={() => handleMemberSelection(contact.id)}
+                      />
+                      <span>{contact.name}</span>
+                    </label>
+                  ))}
+                  {contacts.length === 0 && (
+                    <p style={styles.helperText}>
+                      No teammates available to add right now.
+                    </p>
+                  )}
+                </div>
+                {groupFormStatus && (
+                  <p style={styles.formError}>{groupFormStatus}</p>
+                )}
+                <div style={styles.groupCreatorActions}>
+                  <button
+                    type="button"
+                    style={styles.secondaryButton}
+                    onClick={resetGroupForm}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    style={{
+                      ...styles.primaryButton,
+                      opacity: isSubmittingGroup ? 0.7 : 1,
+                    }}
+                    disabled={isSubmittingGroup}
+                  >
+                    {isSubmittingGroup ? "Creating..." : "Create group"}
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
+        )}
       </aside>
 
       <section style={styles.chatPane}>
@@ -632,6 +970,66 @@ export default function ChatPage() {
           </button>
         </header>
 
+        {activeRoster === "group" && activeGroup && (
+          <div style={styles.groupMetaHud}>
+            <div style={styles.memberListSection}>
+              <p style={styles.groupEyebrow}>
+                Members ({activeGroup.members.length})
+              </p>
+              <div style={styles.memberChipList}>
+                {activeGroup.members.map((memberId) => (
+                  <div key={memberId} style={styles.memberChip}>
+                    <span>{lookupName(memberId)}</span>
+                    {memberId !== currentUserId && (
+                      <button
+                        type="button"
+                        style={styles.memberRemoveButton}
+                        onClick={() => handleRemoveMemberFromGroup(memberId)}
+                        disabled={removingMemberId === memberId}
+                      >
+                        {removingMemberId === memberId ? "Removing..." : "Remove"}
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+              {removeMemberError && (
+                <p style={styles.formError}>{removeMemberError}</p>
+              )}
+            </div>
+            <form style={styles.memberAddForm} onSubmit={handleAddMemberToGroup}>
+              <label style={styles.groupFormLabel}>
+                Add teammate
+                <select
+                  style={styles.groupFormInput}
+                  value={pendingMemberId}
+                  onChange={(event) => setPendingMemberId(event.target.value)}
+                >
+                  <option value="">Select teammate...</option>
+                  {availableMembersToAdd.map((user) => (
+                    <option key={user.id} value={user.id}>
+                      {user.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {memberActionError && (
+                <p style={styles.formError}>{memberActionError}</p>
+              )}
+              <button
+                type="submit"
+                style={{
+                  ...styles.secondaryButton,
+                  opacity: !pendingMemberId || isAddingMember ? 0.6 : 1,
+                }}
+                disabled={!pendingMemberId || isAddingMember}
+              >
+                {isAddingMember ? "Adding..." : "Add member"}
+              </button>
+            </form>
+          </div>
+        )}
+
         <div style={styles.messagesPane}>
           {currentMessages.length === 0 ? (
             <div style={styles.blankMessages}>
@@ -640,6 +1038,14 @@ export default function ChatPage() {
           ) : (
             currentMessages.map((message) => {
               const isSelf = message.from === currentUserId;
+              const canShowMessageActions =
+                activeRoster === "direct" &&
+                isSelf &&
+                Boolean(message.id) &&
+                !message.optimistic;
+              const isActionActive =
+                canShowMessageActions &&
+                messageActionTarget?.messageId === message.id;
               return (
                 <div
                   key={message.id}
@@ -648,6 +1054,25 @@ export default function ChatPage() {
                     alignSelf: isSelf ? "flex-end" : "flex-start",
                     background: isSelf ? "#4c1d95" : "#1e1b4b",
                   }}
+                  onPointerDown={
+                    canShowMessageActions
+                      ? () => beginMessageActionCountdown(message)
+                      : undefined
+                  }
+                  onPointerUp={
+                    canShowMessageActions ? cancelMessageActionCountdown : undefined
+                  }
+                  onPointerLeave={
+                    canShowMessageActions ? cancelMessageActionCountdown : undefined
+                  }
+                  onContextMenu={
+                    canShowMessageActions
+                      ? (event) => {
+                          event.preventDefault();
+                          markMessageActionTarget(message);
+                        }
+                      : undefined
+                  }
                 >
                   <div style={styles.messageMeta}>
                     <strong>{lookupName(message.from)}</strong>
@@ -661,6 +1086,37 @@ export default function ChatPage() {
                     )}
                   </div>
                   <p style={styles.messageBody}>{message.message}</p>
+                  {isActionActive && (
+                    <div style={styles.messageActions}>
+                      {messageActionError && (
+                        <p style={styles.messageActionError}>{messageActionError}</p>
+                      )}
+                      <div style={styles.messageActionButtons}>
+                        <button
+                          type="button"
+                          style={{
+                            ...styles.messageActionButton,
+                            ...styles.messageActionDanger,
+                            opacity:
+                              isDeletingMessageId === message.id ? 0.7 : 1,
+                          }}
+                          disabled={isDeletingMessageId === message.id}
+                          onClick={handleDeleteSelectedMessage}
+                        >
+                          {isDeletingMessageId === message.id
+                            ? "Deleting..."
+                            : "Delete"}
+                        </button>
+                        <button
+                          type="button"
+                          style={styles.messageActionButton}
+                          onClick={dismissMessageAction}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               );
             })
@@ -699,6 +1155,7 @@ const styles = {
   page: {
     height: "100vh",
     overflow: "hidden",
+    boxSizing: "border-box",
     display: "flex",
     background: "#0f172a",
     color: "#e2e8f0",
@@ -711,6 +1168,7 @@ const styles = {
     flexDirection: "column",
     gap: 16,
     overflowY: "auto",
+    boxSizing: "border-box",
   },
   profileCard: {
     display: "flex",
@@ -784,6 +1242,66 @@ const styles = {
     gap: 8,
     overflowY: "auto",
   },
+  groupCreator: {
+    marginTop: 16,
+    padding: 16,
+    borderRadius: 14,
+    border: "1px solid rgba(148,163,184,0.4)",
+    background: "rgba(15,23,42,0.6)",
+    display: "flex",
+    flexDirection: "column",
+    gap: 12,
+  },
+  groupCreatorButton: {
+    borderRadius: 999,
+    border: "none",
+    background: "#7c3aed",
+    color: "#fff",
+    padding: "12px 24px",
+    fontWeight: 600,
+    cursor: "pointer",
+  },
+  groupForm: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 12,
+  },
+  groupFormLabel: {
+    fontSize: "0.85rem",
+    display: "flex",
+    flexDirection: "column",
+    gap: 6,
+  },
+  groupFormInput: {
+    width: "100%",
+    borderRadius: 10,
+    border: "1px solid rgba(148,163,184,0.4)",
+    padding: "10px 12px",
+    background: "rgba(15,23,42,0.8)",
+    color: "#e2e8f0",
+  },
+  groupMemberChecklist: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 6,
+    maxHeight: 160,
+    overflowY: "auto",
+  },
+  groupMemberOption: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    fontSize: "0.9rem",
+  },
+  groupCreatorActions: {
+    display: "flex",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  formError: {
+    color: "#fb7185",
+    fontSize: "0.85rem",
+  },
   roomButton: {
     borderRadius: 14,
     padding: 12,
@@ -822,11 +1340,62 @@ const styles = {
     gap: 16,
     height: "100%",
     overflow: "hidden",
+    boxSizing: "border-box",
   },
   chatHeader: {
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
+  },
+  groupMetaHud: {
+    display: "flex",
+    justifyContent: "space-between",
+    gap: 16,
+    padding: 16,
+    borderRadius: 16,
+    border: "1px solid rgba(148,163,184,0.2)",
+    background: "rgba(15,23,42,0.6)",
+  },
+  memberListSection: {
+    flex: 1,
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
+  },
+  groupEyebrow: {
+    margin: 0,
+    textTransform: "uppercase",
+    letterSpacing: 1,
+    fontSize: "0.75rem",
+    color: "#94a3b8",
+  },
+  memberChipList: {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  memberChip: {
+    padding: "4px 10px",
+    borderRadius: 999,
+    background: "rgba(124,58,237,0.2)",
+    border: "1px solid rgba(124,58,237,0.4)",
+    fontSize: "0.8rem",
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 8,
+  },
+  memberRemoveButton: {
+    border: "none",
+    background: "transparent",
+    color: "#f87171",
+    cursor: "pointer",
+    fontSize: "0.75rem",
+  },
+  memberAddForm: {
+    width: 260,
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
   },
   chatEyebrow: {
     margin: 0,
@@ -848,6 +1417,7 @@ const styles = {
     flexDirection: "column",
     gap: 12,
     overflowY: "auto",
+    boxSizing: "border-box",
   },
   blankMessages: {
     margin: "auto",
@@ -877,10 +1447,46 @@ const styles = {
     margin: 0,
     lineHeight: 1.4,
   },
+  messageActions: {
+    marginTop: 8,
+    paddingTop: 8,
+    borderTop: "1px solid rgba(255,255,255,0.15)",
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
+  },
+  messageActionButtons: {
+    display: "flex",
+    gap: 8,
+  },
+  messageActionButton: {
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,0.4)",
+    background: "transparent",
+    color: "#e2e8f0",
+    padding: "4px 12px",
+    fontSize: "0.8rem",
+    cursor: "pointer",
+  },
+  messageActionDanger: {
+    borderColor: "rgba(248,113,113,0.6)",
+    color: "#fecaca",
+  },
+  messageActionError: {
+    margin: 0,
+    fontSize: "0.8rem",
+    color: "#fecaca",
+  },
   composer: {
     display: "flex",
     gap: 12,
     alignItems: "flex-end",
+    position: "sticky",
+    bottom: 0,
+    paddingTop: 12,
+    background: "#0f172a",
+    boxSizing: "border-box",
+    zIndex: 5,
   },
   textarea: {
     flex: 1,

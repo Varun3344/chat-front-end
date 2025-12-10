@@ -22,3 +22,14 @@ export async function fetchDirectMessagesViaApi(payload, options = {}) {
     signal: options.signal,
   });
 }
+
+/**
+ * Delete a direct message by ID via the Next.js proxy.
+ * @param {{ messageId: string }} payload
+ */
+export async function deleteDirectMessageViaApi(payload) {
+  return clientApiFetch("/api/chat/direct/delete", {
+    method: "POST",
+    body: payload,
+  });
+}

@@ -35,3 +35,36 @@ export async function listGroupsViaApi(memberId, options = {}) {
     signal: options.signal,
   });
 }
+
+/**
+ * Create a new group.
+ * @param {{ groupName: string; createdBy: string }} payload
+ */
+export async function createGroupViaApi(payload) {
+  return clientApiFetch("/api/chat/group/create", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+/**
+ * Add a member to a specific group.
+ * @param {{ groupId: string; memberId: string }} payload
+ */
+export async function addGroupMemberViaApi(payload) {
+  return clientApiFetch("/api/chat/group/member/add", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+/**
+ * Remove a member from a group.
+ * @param {{ groupId: string; memberId: string }} payload
+ */
+export async function removeGroupMemberViaApi(payload) {
+  return clientApiFetch("/api/chat/group/member/remove", {
+    method: "POST",
+    body: payload,
+  });
+}
