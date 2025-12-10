@@ -1,9 +1,23 @@
 import { io } from "socket.io-client";
 
+const normalizeSocketUrl = (value) => {
+  if (!value) return null;
+  const trimmed = String(value).trim();
+  if (!trimmed) return null;
+  if (/^wss?:\/\//i.test(trimmed)) {
+    return trimmed.replace(/^ws:/i, "wss:");
+  }
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed.replace(/^http/i, "ws");
+  }
+  return `wss://${trimmed.replace(/^\/+/, "")}`;
+};
+
 const SOCKET_URL =
-  process.env.NEXT_PUBLIC_CHAT_SOCKET_URL ||
-  process.env.NEXT_PUBLIC_CHAT_API_BASE ||
-  "http://localhost:4000";
+  normalizeSocketUrl(
+    process.env.NEXT_PUBLIC_CHAT_SOCKET_URL ||
+      process.env.NEXT_PUBLIC_CHAT_API_BASE
+  ) || "ws://localhost:4000";
 
 export const SOCKET_EVENTS = {
   REGISTER_USER: "register_user",

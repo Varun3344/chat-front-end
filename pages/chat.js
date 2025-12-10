@@ -697,7 +697,8 @@ export default function ChatPage() {
 
 const styles = {
   page: {
-    minHeight: "100vh",
+    height: "100vh",
+    overflow: "hidden",
     display: "flex",
     background: "#0f172a",
     color: "#e2e8f0",
@@ -709,6 +710,7 @@ const styles = {
     display: "flex",
     flexDirection: "column",
     gap: 16,
+    overflowY: "auto",
   },
   profileCard: {
     display: "flex",
@@ -818,6 +820,8 @@ const styles = {
     flexDirection: "column",
     padding: 24,
     gap: 16,
+    height: "100%",
+    overflow: "hidden",
   },
   chatHeader: {
     display: "flex",
