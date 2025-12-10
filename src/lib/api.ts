@@ -128,6 +128,20 @@ const KEYS = {
 
 type KeyName = keyof typeof KEYS;
 
+const KEY_LABELS: Record<KeyName, string> = {
+  directSend: "CHAT_API_KEY_DIRECT",
+  directFetch: "CHAT_API_KEY_DIRECT_FETCH",
+  directAttachment: "CHAT_API_KEY_DIRECT_ATTACHMENT",
+  directDelete: "CHAT_API_KEY_DIRECT_DELETE",
+  groupCreate: "CHAT_API_KEY_GROUP_CREATE",
+  groupMember: "CHAT_API_KEY_GROUP_MEMBER",
+  groupSend: "CHAT_API_KEY_GROUP",
+  groupFetch: "CHAT_API_KEY_GROUP",
+  groupAttachment: "CHAT_API_KEY_GROUP_ATTACHMENT",
+  groupDelete: "CHAT_API_KEY_GROUP_DELETE",
+  admin: "CHAT_API_KEY_ADMIN",
+};
+
 const is404 = (error: unknown) =>
   error instanceof Error && /\(404\)/.test(error.message ?? "");
 
@@ -135,10 +149,24 @@ const getKey = (key: KeyName) => {
   const value = KEYS[key];
   if (!value) {
     throw new Error(
-      `Missing API key: ${key}. Please verify the corresponding CHAT_API_KEY_* env variable in .env.local.`
+      `Missing API key: ${KEY_LABELS[key]}. Please set it in your .env.local file.`
     );
   }
   return value;
+};
+
+const getAnyKey = (...keys: KeyName[]) => {
+  for (const key of keys) {
+    const value = KEYS[key];
+    if (value) {
+      return value;
+    }
+  }
+  throw new Error(
+    `Missing API key. Set one of the following env vars: ${keys
+      .map((key) => KEY_LABELS[key])
+      .join(", ")}.`
+  );
 };
 
 const unwrap = <T>(payload: MaybeEnvelope<T>): T => {
@@ -326,76 +354,25 @@ export const fetchGroupMessages = async (groupId: string) => {
 };
 
 export const listGroups = async (memberId: string) => {
-  const apiKey = KEYS.admin ?? getKey("groupFetch");
-  const attempts: Array<() => Promise<GroupSummary[] | { groups?: GroupSummary[] }>> = [];
-
-  const pushAttempt = (factory: () => Promise<GroupSummary[] | { groups?: GroupSummary[] }>) =>
-    attempts.push(factory);
-
-  if (memberId) {
-    pushAttempt(() =>
-      requestData(`/chat/group/list/${memberId}`, {
-        method: "GET",
-        apiKey,
-      })
-    );
-    pushAttempt(() =>
-      requestData("/chat/group/list", {
-        method: "GET",
-        apiKey,
-        query: { memberId },
-      })
-    );
-    pushAttempt(() =>
-      requestData("/chat/group/list", {
-        method: "GET",
-        apiKey,
-        query: { member: memberId },
-      })
-    );
-    pushAttempt(() =>
-      requestData("/chat/group/list", {
-        method: "POST",
-        apiKey,
-        body: { memberId },
-      })
-    );
-    pushAttempt(() =>
-      requestData("/chat/group/list", {
-        method: "POST",
-        apiKey,
-        body: { member: memberId },
-      })
-    );
+  if (!memberId) {
+    return [];
   }
-
-  pushAttempt(() =>
-    requestData("/chat/group/list", {
-      method: "GET",
-      apiKey,
-    })
-  );
-
-  let lastError: unknown = null;
-  for (const attempt of attempts) {
-    try {
-      const response = await attempt();
-      const groups = asArray<GroupSummary>(response);
-      if (groups.length > 0) {
-        return groups;
+  const apiKey = getAnyKey("groupMember", "admin", "groupFetch");
+  try {
+    const response = await requestData<GroupSummary[] | { groups?: GroupSummary[] }>(
+      `/chat/group/member/${memberId}`,
+      {
+        method: "GET",
+        apiKey,
       }
-    } catch (error) {
-      lastError = error;
-      if (!is404(error)) {
-        continue;
-      }
+    );
+    return asArray<GroupSummary>(response);
+  } catch (error) {
+    if (is404(error)) {
+      return [];
     }
+    throw error;
   }
-
-  if (lastError && !is404(lastError)) {
-    throw lastError;
-  }
-  return [];
 };
 
 export const uploadGroupAttachment = (payload: GroupAttachmentRequest) =>
