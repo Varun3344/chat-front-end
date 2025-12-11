@@ -15,6 +15,7 @@ import {
 } from "src/lib/client/groupMessages";
 import { USERS } from "../data/dummyData";
 import socket, {
+  SOCKET_EVENTS,
   getSocket,
   joinDirectRoom,
   joinGroupRoom,
@@ -64,6 +65,8 @@ const DEFAULT_GROUPS = [
 
 const lookupName = (userId) =>
   USERS.find((user) => user.id === userId)?.name ?? userId ?? "Teammate";
+
+const PRESENCE_STALE_WINDOW_MS = 30_000;
 
 const formatTime = (value) => {
   try {
@@ -632,6 +635,7 @@ export default function ChatPage() {
       if (messageActionTimerRef.current) {
         clearTimeout(messageActionTimerRef.current);
       }
+      instance.disconnect();
     };
   }, []);
 
@@ -647,9 +651,13 @@ export default function ChatPage() {
       if (!Array.isArray(payload)) return;
       const mapped = payload.reduce((acc, entry) => {
         if (entry?.userId) {
+          const normalizedLastSeen =
+            typeof entry.lastSeen === "number"
+              ? entry.lastSeen
+              : Date.parse(entry.lastSeen ?? "") || Date.now();
           acc[entry.userId] = {
             status: entry.status ?? "offline",
-            lastSeen: entry.lastSeen ?? Date.now(),
+            lastSeen: normalizedLastSeen,
           };
         }
         return acc;
@@ -657,14 +665,21 @@ export default function ChatPage() {
       setPresenceMap(mapped);
     };
 
-    const handleUpdate = (entry) => {
+  const handleUpdate = (entry) => {
       if (!entry?.userId) return;
+      const normalizedLastSeen =
+        typeof entry.lastSeen === "number"
+          ? entry.lastSeen
+          : Date.parse(entry.lastSeen ?? "") || Date.now();
       setPresenceMap((prev) => ({
         ...prev,
         [entry.userId]: {
           ...(prev[entry.userId] || {}),
           status: entry.status ?? prev[entry.userId]?.status ?? "offline",
-          lastSeen: entry.lastSeen ?? prev[entry.userId]?.lastSeen ?? Date.now(),
+          lastSeen:
+            normalizedLastSeen ??
+            prev[entry.userId]?.lastSeen ??
+            Date.now(),
         },
       }));
     };
@@ -696,17 +711,25 @@ export default function ChatPage() {
 
   useEffect(() => {
     if (!isSocketReady || !currentUserId) return;
-    const unsubscribe = listenForGroupActivity((payload) => {
-      if (!payload?.groupId) return;
-      const memberList = Array.isArray(payload.members) ? payload.members : [];
-      const isMember =
-        memberList.length === 0 ||
-        memberList.includes(currentUserId) ||
-        payload.createdBy === currentUserId;
-      if (!isMember) {
-        return;
-      }
-      setRemoteGroups((prev) => {
+    const unsubscribe = listenForGroupActivity(
+      ({ eventName, payload } = {}) => {
+        if (!payload?.groupId) return;
+        const memberList = Array.isArray(payload.members)
+          ? payload.members
+          : [];
+        const changedMemberId =
+          payload.memberId ??
+          payload.newlyAddedMemberId ??
+          payload.removedMemberId ??
+          null;
+        const isMember =
+          memberList.length === 0 ||
+          memberList.includes(currentUserId) ||
+          payload.createdBy === currentUserId ||
+          changedMemberId === currentUserId;
+        if (!isMember) {
+          return;
+        }
         const normalized = {
           id: payload.groupId ?? payload.id,
           name: payload.name ?? payload.groupName ?? "Untitled group",
@@ -714,20 +737,89 @@ export default function ChatPage() {
           description: payload.description ?? payload.name ?? "Group chat",
           createdBy: payload.createdBy ?? payload.ownerId ?? null,
         };
-        const existingIndex = prev.findIndex(
-          (group) => group.id === normalized.id
-        );
-        if (existingIndex === -1) {
-          return [...prev, normalized];
-        }
-        const nextGroups = [...prev];
-        nextGroups[existingIndex] = {
-          ...nextGroups[existingIndex],
-          ...normalized,
-        };
-        return nextGroups;
-      });
-    });
+        setRemoteGroups((prev) => {
+          const existingIndex = prev.findIndex(
+            (group) => group.id === normalized.id
+          );
+          if (eventName === SOCKET_EVENTS.GROUP_CREATED) {
+            if (existingIndex === -1) {
+              return [...prev, normalized];
+            }
+            const nextGroups = [...prev];
+            nextGroups[existingIndex] = {
+              ...nextGroups[existingIndex],
+              ...normalized,
+            };
+            return nextGroups;
+          }
+
+          if (existingIndex === -1) {
+            if (
+              eventName === SOCKET_EVENTS.GROUP_MEMBER_ADDED &&
+              changedMemberId === currentUserId
+            ) {
+              return [...prev, normalized];
+            }
+            return prev;
+          }
+
+          const nextGroups = [...prev];
+          const currentGroup = nextGroups[existingIndex];
+
+          if (
+            eventName === SOCKET_EVENTS.GROUP_MEMBER_REMOVED &&
+            changedMemberId === currentUserId
+          ) {
+            nextGroups.splice(existingIndex, 1);
+            return nextGroups;
+          }
+
+          if (eventName === SOCKET_EVENTS.GROUP_MEMBER_ADDED) {
+            const existingMembers = Array.isArray(currentGroup.members)
+              ? currentGroup.members
+              : [];
+            const mergedMembers = Array.from(
+              new Set([
+                ...existingMembers,
+                ...memberList,
+                changedMemberId,
+              ].filter(Boolean))
+            );
+            nextGroups[existingIndex] = {
+              ...currentGroup,
+              members: mergedMembers,
+            };
+            return nextGroups;
+          }
+
+          if (eventName === SOCKET_EVENTS.GROUP_MEMBER_REMOVED) {
+            const existingMembers = Array.isArray(currentGroup.members)
+              ? currentGroup.members
+              : [];
+            const filteredMembers = changedMemberId
+              ? existingMembers.filter((id) => id !== changedMemberId)
+              : existingMembers;
+            nextGroups[existingIndex] = {
+              ...currentGroup,
+              members: filteredMembers,
+            };
+            return nextGroups;
+          }
+
+          if (eventName === SOCKET_EVENTS.GROUP_UPDATED) {
+            nextGroups[existingIndex] = {
+              ...currentGroup,
+              ...normalized,
+              members:
+                memberList.length > 0 ? memberList : currentGroup.members,
+            };
+            return nextGroups;
+          }
+
+          return prev;
+        });
+      }
+    );
     return () => {
       unsubscribe();
     };
@@ -1171,10 +1263,27 @@ export default function ChatPage() {
     stopLocalTyping();
   };
 
-  const currentMessages =
-    activeRoster === "group"
-      ? groupMessages[activeGroupId] ?? []
-      : directMessages[activeContactId] ?? [];
+  const currentMessages = useMemo(() => {
+    if (activeRoster === "group") {
+      return groupMessages[activeGroupId] ?? [];
+    }
+    return directMessages[activeContactId] ?? [];
+  }, [
+    activeRoster,
+    activeGroupId,
+    activeContactId,
+    groupMessages,
+    directMessages,
+  ]);
+
+  const orderedMessages = useMemo(() => {
+    const history = Array.isArray(currentMessages) ? currentMessages : [];
+    return [...history].sort((a, b) => {
+      const left = Date.parse(a.timestamp ?? "") || 0;
+      const right = Date.parse(b.timestamp ?? "") || 0;
+      return right - left;
+    });
+  }, [currentMessages]);
 
   const roomLabel =
     activeRoster === "group"
@@ -1184,6 +1293,31 @@ export default function ChatPage() {
 
   const canSendToRoom =
     activeRoster === "group" ? Boolean(activeGroupId) : Boolean(activeContactId);
+
+  const normalizePresenceEntry = (entry) => {
+    if (!entry) {
+      return { status: "offline", lastSeen: 0 };
+    }
+    const lastSeen =
+      typeof entry.lastSeen === "number"
+        ? entry.lastSeen
+        : Date.parse(entry.lastSeen ?? "") || 0;
+    return { status: entry.status ?? "offline", lastSeen };
+  };
+
+  const isUserOnline = (userId) => {
+    if (!userId) return false;
+    const entry = normalizePresenceEntry(presenceMap[userId]);
+    if (entry.status !== "online") {
+      return false;
+    }
+    if (!entry.lastSeen) {
+      return false;
+    }
+    return Date.now() - entry.lastSeen < PRESENCE_STALE_WINDOW_MS;
+  };
+
+  const presenceLabelFor = (userId) => (isUserOnline(userId) ? "online" : "offline");
 
   const directTypingActive =
     activeRoster === "direct" &&
@@ -1269,72 +1403,100 @@ export default function ChatPage() {
 
         <div style={styles.roomList}>
           {activeRoster === "group"
-            ? groups.map((group) => (
-                <button
-                  key={group.id}
-                  type="button"
-                  onClick={() => {
-                    setActiveGroupId(group.id);
-                    setActiveRoster("group");
-                  }}
-                  style={{
-                    ...styles.roomButton,
-                    ...(group.id === activeGroupId ? styles.roomButtonActive : {}),
-                  }}
-                >
-                  <div style={styles.roomHeader}>
-                    <strong>{group.name}</strong>
-                    {unreadCounts.group?.[group.id] > 0 && (
-                      <span style={styles.unreadBadge}>
-                        {unreadCounts.group[group.id]}
-                      </span>
-                    )}
-                  </div>
-                  <span style={styles.roomDescription}>{group.description}</span>
-                  <span style={styles.roomMeta}>
-                    {group.members.length} members
-                  </span>
-                </button>
-              ))
-            : contacts.map((contact) => (
-                <button
-                  key={contact.id}
-                  type="button"
-                  onClick={() => {
-                    setActiveRoster("direct");
-                    setActiveContactId(contact.id);
-                  }}
-                  style={{
-                    ...styles.roomButton,
-                    ...(contact.id === activeContactId ? styles.roomButtonActive : {}),
-                  }}
-                >
-                  <div style={styles.roomHeader}>
-                    <strong>{contact.name}</strong>
-                    <div style={styles.roomStatus}>
-                      <span
-                        style={{
-                          ...styles.presenceDot,
-                          background:
-                            presenceMap[contact.id]?.status === "online"
-                              ? "#22c55e"
-                              : "#facc15",
-                        }}
-                        title={presenceMap[contact.id]?.status ?? "offline"}
-                      />
-                      <span style={styles.presenceLabel}>
-                        {presenceMap[contact.id]?.status ?? "offline"}
-                      </span>
-                      {unreadCounts.direct?.[contact.id] > 0 && (
+            ? groups.map((group) => {
+                const typingState = remoteTyping.group[group.id] ?? {};
+                const activeTypers = Object.keys(typingState).filter(
+                  (memberId) => memberId !== currentUserId
+                );
+                const typingLabel =
+                  activeTypers.length === 0
+                    ? null
+                    : activeTypers.length === 1
+                    ? `${lookupName(activeTypers[0])} is typing...`
+                    : `${activeTypers.length} teammates are typing...`;
+                return (
+                  <button
+                    key={group.id}
+                    type="button"
+                    onClick={() => {
+                      setActiveGroupId(group.id);
+                      setActiveRoster("group");
+                    }}
+                    style={{
+                      ...styles.roomButton,
+                      ...(group.id === activeGroupId ? styles.roomButtonActive : {}),
+                    }}
+                  >
+                    <div style={styles.roomHeader}>
+                      <strong>{group.name}</strong>
+                      {unreadCounts.group?.[group.id] > 0 && (
                         <span style={styles.unreadBadge}>
-                          {unreadCounts.direct[contact.id]}
+                          {unreadCounts.group[group.id]}
                         </span>
                       )}
                     </div>
-                  </div>
-                  <span style={styles.roomDescription}>{contact.role}</span>
-                </button>
-              ))}
+                    <span
+                      style={{
+                        ...styles.roomDescription,
+                        ...(typingLabel ? styles.typingLabel : {}),
+                      }}
+                    >
+                      {typingLabel || group.description}
+                    </span>
+                    <span style={styles.roomMeta}>
+                      {group.members.length} members
+                    </span>
+                  </button>
+                );
+              })
+            : contacts.map((contact) => {
+                const isContactTyping = Boolean(remoteTyping.direct[contact.id]);
+                const isContactOnline = isUserOnline(contact.id);
+                const typingLabel = isContactTyping ? "typing..." : contact.role;
+                return (
+                  <button
+                    key={contact.id}
+                    type="button"
+                    onClick={() => {
+                      setActiveRoster("direct");
+                      setActiveContactId(contact.id);
+                    }}
+                    style={{
+                      ...styles.roomButton,
+                      ...(contact.id === activeContactId ? styles.roomButtonActive : {}),
+                    }}
+                  >
+                    <div style={styles.roomHeader}>
+                      <strong>{contact.name}</strong>
+                      <div style={styles.roomStatus}>
+                        <span
+                          style={{
+                            ...styles.presenceDot,
+                            background: isContactOnline ? "#22c55e" : "#facc15",
+                          }}
+                          title={presenceLabelFor(contact.id)}
+                        />
+                        <span style={styles.presenceLabel}>
+                          {presenceLabelFor(contact.id)}
+                        </span>
+                        {unreadCounts.direct?.[contact.id] > 0 && (
+                          <span style={styles.unreadBadge}>
+                            {unreadCounts.direct[contact.id]}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <span
+                      style={{
+                        ...styles.roomDescription,
+                        ...(isContactTyping ? styles.typingLabel : {}),
+                      }}
+                    >
+                      {typingLabel}
+                    </span>
+                  </button>
+                );
+              })}
 
           {activeRoster === "group" && groups.length === 0 && (
             <p style={styles.helperText}>
@@ -1456,10 +1618,7 @@ export default function ChatPage() {
                       <span
                         style={{
                           ...styles.presenceDot,
-                          background:
-                            presenceMap[memberId]?.status === "online"
-                              ? "#22c55e"
-                              : "#facc15",
+                          background: isUserOnline(memberId) ? "#22c55e" : "#facc15",
                         }}
                       />
                       {lookupName(memberId)}
@@ -1520,12 +1679,12 @@ export default function ChatPage() {
         )}
 
         <div style={styles.messagesPane}>
-          {currentMessages.length === 0 ? (
+          {orderedMessages.length === 0 ? (
             <div style={styles.blankMessages}>
               <p>No messages yet. Say hi to kick off this room.</p>
             </div>
           ) : (
-            currentMessages.map((message) => {
+            orderedMessages.map((message) => {
               const isSelf = message.from === currentUserId;
               const canShowMessageActions =
                 activeRoster === "direct" &&
@@ -1874,6 +2033,10 @@ const styles = {
   roomDescription: {
     fontSize: "0.85rem",
     color: "#94a3b8",
+  },
+  typingLabel: {
+    color: "#c4b5fd",
+    fontWeight: 600,
   },
   roomMeta: {
     fontSize: "0.75rem",

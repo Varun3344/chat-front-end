@@ -27,16 +27,22 @@ export const SOCKET_EVENTS = {
   RECEIVE_DIRECT_MESSAGE: "receive_direct_message",
   JOIN_GROUP_ROOM: "join_group_room",
   LEAVE_GROUP_ROOM: "leave_group_room",
-  SEND_GROUP_MESSAGE: "send_group_message",
-  RECEIVE_GROUP_MESSAGE: "receive_group_message",
-  DIRECT_TYPING: "direct_typing",
-  GROUP_TYPING: "group_typing",
+  SEND_GROUP_MESSAGE: "group:message",
+  RECEIVE_GROUP_MESSAGE: "group:message",
+  TYPING: "typing",
+  DIRECT_TYPING: "typing",
+  DIRECT_TYPING_FALLBACK: "direct_typing",
+  GROUP_TYPING: "typing",
+  GROUP_TYPING_FALLBACK: "group_typing",
   DIRECT_ATTACHMENT: "direct_attachment_uploaded",
   GROUP_ATTACHMENT: "group_attachment_uploaded",
   PRESENCE_SNAPSHOT: "presence_snapshot",
   PRESENCE_UPDATE: "user_presence",
   UNREAD_COUNTS: "unread_counts",
-  GROUP_ACTIVITY: "group_created",
+  GROUP_CREATED: "group:created",
+  GROUP_UPDATED: "group:updated",
+  GROUP_MEMBER_ADDED: "group:memberAdded",
+  GROUP_MEMBER_REMOVED: "group:memberRemoved",
   FOCUS_GROUP_ROOM: "focus_group_room",
   BLUR_GROUP_ROOM: "blur_group_room",
 };
@@ -186,7 +192,8 @@ export const sendDirectTyping = ({ from, to, isTyping }) => {
   if (!to) return null;
   const instance = ensureSocket();
   if (!instance) return null;
-  instance.emit(SOCKET_EVENTS.DIRECT_TYPING, {
+  instance.emit(SOCKET_EVENTS.TYPING, {
+    scope: "direct",
     from: from || subscriptions.userId || undefined,
     to,
     isTyping: Boolean(isTyping),
@@ -198,7 +205,8 @@ export const sendGroupTyping = ({ groupId, from, isTyping }) => {
   if (!groupId) return null;
   const instance = ensureSocket();
   if (!instance) return null;
-  instance.emit(SOCKET_EVENTS.GROUP_TYPING, {
+  instance.emit(SOCKET_EVENTS.TYPING, {
+    scope: "group",
     groupId,
     from: from || subscriptions.userId || undefined,
     isTyping: Boolean(isTyping),
@@ -244,14 +252,61 @@ const createListener = (eventName) => (handler) => {
   return () => instance.off(eventName, listener);
 };
 
-export const listenForDirectTyping = createListener(SOCKET_EVENTS.DIRECT_TYPING);
-export const listenForGroupTyping = createListener(SOCKET_EVENTS.GROUP_TYPING);
+const subscribeToTypingScope = (scope) => (handler) => {
+  const instance = ensureSocket();
+  if (!instance || typeof handler !== "function") {
+    return () => {};
+  }
+  const listener = (payload = {}) => {
+    const payloadScope =
+      payload.scope ?? (payload.groupId ? "group" : "direct");
+    if (payloadScope !== scope) {
+      return;
+    }
+    handler(payload);
+  };
+  instance.on(SOCKET_EVENTS.TYPING, listener);
+  if (scope === "direct") {
+    instance.on(SOCKET_EVENTS.DIRECT_TYPING_FALLBACK, listener);
+  } else {
+    instance.on(SOCKET_EVENTS.GROUP_TYPING_FALLBACK, listener);
+  }
+  return () => {
+    instance.off(SOCKET_EVENTS.TYPING, listener);
+    if (scope === "direct") {
+      instance.off(SOCKET_EVENTS.DIRECT_TYPING_FALLBACK, listener);
+    } else {
+      instance.off(SOCKET_EVENTS.GROUP_TYPING_FALLBACK, listener);
+    }
+  };
+};
+
+export const listenForDirectTyping = subscribeToTypingScope("direct");
+export const listenForGroupTyping = subscribeToTypingScope("group");
 export const listenForDirectAttachments = createListener(SOCKET_EVENTS.DIRECT_ATTACHMENT);
 export const listenForGroupAttachments = createListener(SOCKET_EVENTS.GROUP_ATTACHMENT);
 export const listenForPresenceSnapshots = createListener(SOCKET_EVENTS.PRESENCE_SNAPSHOT);
 export const listenForPresenceUpdates = createListener(SOCKET_EVENTS.PRESENCE_UPDATE);
 export const listenForUnreadCounts = createListener(SOCKET_EVENTS.UNREAD_COUNTS);
-export const listenForGroupActivity = createListener(SOCKET_EVENTS.GROUP_ACTIVITY);
+
+export const listenForGroupActivity = (handler) => {
+  const instance = ensureSocket();
+  if (!instance || typeof handler !== "function") {
+    return () => {};
+  }
+  const eventNames = [
+    SOCKET_EVENTS.GROUP_CREATED,
+    SOCKET_EVENTS.GROUP_UPDATED,
+    SOCKET_EVENTS.GROUP_MEMBER_ADDED,
+    SOCKET_EVENTS.GROUP_MEMBER_REMOVED,
+  ];
+  const listeners = eventNames.map((eventName) => {
+    const listener = (payload) => handler({ eventName, payload });
+    instance.on(eventName, listener);
+    return () => instance.off(eventName, listener);
+  });
+  return () => listeners.forEach((unsubscribe) => unsubscribe());
+};
 
 const defaultSocket = getSocket();
 
